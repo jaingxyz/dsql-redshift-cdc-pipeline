@@ -1,0 +1,16 @@
+# Reduce the build context to just what the Dockerfile needs.
+# Without this, the whole `app/` tree (including any local venvs) ships
+# to the docker daemon — slow, and risks leaking secrets if you ever
+# happen to have a `.env` next door.
+
+__pycache__/
+*.py[cod]
+*$py.class
+.venv/
+venv/
+.env
+.env.*
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+*.log

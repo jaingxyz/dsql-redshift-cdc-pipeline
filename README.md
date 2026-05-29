@@ -103,6 +103,41 @@ aws redshift-data execute-statement \
 See [infra/README.md](infra/README.md) for the full bootstrap walkthrough,
 customization options, and teardown instructions.
 
+## Always-on simulator (optional)
+
+If you want this stack to keep producing CDC events while you experiment
+with Redshift Serverless / SageMaker Studio, deploy the optional simulator
+stack defined in [`infra/cloudformation-simulator.yaml`](infra/cloudformation-simulator.yaml):
+
+```bash
+infra/scripts/05-deploy-simulator.sh
+```
+
+This adds:
+
+- **ECR private repository** for the simulator container
+- **Minimal VPC** (2 public subnets, no NAT — saves ~$32/mo)
+- **ECS Fargate service** running 1 task on Graviton arm64 (~$3/mo)
+- **AWS Budget** at the configured threshold (default $200/mo)
+
+The simulator runs `order_simulator.py --duration 0 --rate 1` indefinitely,
+proactively reconnecting every 14 minutes (under the DSQL 15-min token cap)
+and using `sslmode=verify-full` per AWS guidance.
+
+**Cost (us-east-1, conservative)**: ~$80–200/mo dominated by Redshift
+Serverless RPU-hours when warm. Tear down with:
+
+```bash
+aws cloudformation delete-stack --stack-name dsql-cdc-simulator
+```
+
+Or pause without tearing down:
+
+```bash
+aws ecs update-service --cluster dsql-cdc-sim-cluster \
+    --service dsql-cdc-sim-service --desired-count 0
+```
+
 ## Sample analytical queries
 
 Once data is flowing, run any of the queries in

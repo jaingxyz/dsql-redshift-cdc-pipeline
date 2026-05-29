@@ -14,6 +14,10 @@ Usage:
     python order_simulator.py --duration 300 --rate 5
         Run for 5 minutes at ~5 orders/sec.
 
+    python order_simulator.py --duration 0 --rate 1
+        Run indefinitely at ~1 order/sec, reconnecting on auth-token
+        expiry. Used by the always-on Fargate deployment.
+
     python order_simulator.py --seed-only
         Just seed catalog and customers, then exit.
 
@@ -59,11 +63,31 @@ class SimulatorState:
 
 # ---------------------------------------------------------------------------
 # Connection management
+#
+# Aurora DSQL uses IAM auth tokens (not passwords) and enforces SSL. Per the
+# DSQL operating limits:
+#   - tokens expire after 15 minutes
+#   - any single connection lives at most 60 minutes
+#   - sslmode=verify-full is required to validate the server cert chain
+#
+# We mint a fresh token via boto3 on every (re)connect — no caching. The
+# proactive-refresh window (CONN_REFRESH_S, default 14 min) is below the
+# 15-min token cap so we cycle the connection BEFORE it errors out
+# mid-statement. Reactive reconnect still exists in the outer loop in
+# run_simulation() as a safety net for the 60-minute cap and any
+# unexpected disconnect.
+#
+# Note: AWS publishes `aurora_dsql_psycopg` which automates this pattern.
+# We do it manually here because this is sample code; the explicit
+# token-mint + reconnect logic is the point.
 # ---------------------------------------------------------------------------
+
+# Refresh proactively at 14 min so a 15-min token never expires mid-query.
+CONN_REFRESH_S = int(os.environ.get("CONN_REFRESH_S", 14 * 60))
 
 
 def _generate_password() -> str:
-    """Get a short-lived auth token from DSQL."""
+    """Get a short-lived auth token from DSQL (admin role)."""
     client = boto3.client("dsql", region_name=REGION)
     return client.generate_db_connect_admin_auth_token(
         Hostname=f"{CLUSTER_ID}.dsql.{REGION}.on.aws",
@@ -73,14 +97,20 @@ def _generate_password() -> str:
 
 @contextmanager
 def dsql_connection():
-    """Yield a psycopg connection to the DSQL cluster."""
+    """
+    Yield a psycopg connection to the DSQL cluster.
+
+    sslmode=verify-full validates the server cert against the system trust
+    store (Amazon Root CA, present in python:3.11-slim via ca-certificates).
+    Required by DSQL; `require` would TLS-encrypt but skip cert verification.
+    """
     conn = psycopg.connect(
         host=f"{CLUSTER_ID}.dsql.{REGION}.on.aws",
         port=5432,
         dbname="postgres",
         user="admin",
         password=_generate_password(),
-        sslmode="require",
+        sslmode="verify-full",
         autocommit=True,
     )
     try:
@@ -261,60 +291,99 @@ def deliver_order(conn, state: SimulatorState) -> None:
 
 
 def run_simulation(duration_sec: int, target_rate: float) -> None:
+    """
+    Drive the simulator at `target_rate` ops/sec for `duration_sec` seconds.
+
+    `duration_sec <= 0` means run indefinitely (intended for the always-on
+    Fargate deployment in cloudformation-simulator.yaml). In that mode the
+    loop reconnects to DSQL when its auth token expires (~15 min) instead
+    of exiting.
+    """
     sleep_interval = 1.0 / target_rate if target_rate > 0 else 1.0
+    forever = duration_sec <= 0
 
-    with dsql_connection() as conn:
-        catalog = seed_catalog(conn)
-        customer_ids = seed_customers(conn)
+    # Action mix - more creations than later-stage transitions so the funnel
+    # narrows naturally.
+    actions = (
+        [create_order] * 50 + [pay_order] * 30 + [ship_order] * 12 + [deliver_order] * 8
+    )
 
-        state = SimulatorState(
-            customer_ids=customer_ids,
-            product_catalog=catalog,
-            pending_orders=[],
-            paid_orders=[],
-            shipped_orders=[],
-        )
+    state = SimulatorState(
+        customer_ids=[],
+        product_catalog=[],
+        pending_orders=[],
+        paid_orders=[],
+        shipped_orders=[],
+    )
 
-        # Action mix - more creations than later-stage transitions
-        # so the funnel narrows naturally.
-        actions = (
-            [create_order] * 50
-            + [pay_order] * 30
-            + [ship_order] * 12
-            + [deliver_order] * 8
-        )
+    start = time.time()
+    op_count = 0
+    last_log = start
 
-        start = time.time()
-        op_count = 0
-        last_log = start
+    # Outer loop = one DSQL connection's lifetime. We proactively cycle
+    # the connection every CONN_REFRESH_S seconds (default 14 min) so the
+    # 15-min token cap never expires mid-statement. The reactive
+    # OperationalError handler at the bottom is a safety net for the
+    # 60-min hard connection cap and any unexpected disconnect.
+    while True:
+        conn_opened_at = time.time()
+        try:
+            with dsql_connection() as conn:
+                if not state.product_catalog:
+                    state.product_catalog = seed_catalog(conn)
+                if not state.customer_ids:
+                    state.customer_ids = seed_customers(conn)
 
-        while time.time() - start < duration_sec:
-            action = random.choice(actions)
-            try:
-                action(conn, state)
-                op_count += 1
-            except psycopg.Error as e:
-                # DSQL auth tokens expire after ~15 minutes; a long-running
-                # simulation will hit token expiry and end here. Re-run the
-                # script (or wrap the main loop with a reconnect helper)
-                # for runs longer than 15 minutes.
+                while forever or time.time() - start < duration_sec:
+                    # Proactive token refresh: cycle the connection before
+                    # the 15-min token expires. This avoids in-flight
+                    # OperationalErrors that the safety-net path below
+                    # would handle reactively.
+                    if time.time() - conn_opened_at >= CONN_REFRESH_S:
+                        break
+
+                    action = random.choice(actions)
+                    try:
+                        action(conn, state)
+                        op_count += 1
+                    except psycopg.OperationalError:
+                        # Connection-level (60-min cap, network blip,
+                        # unexpected disconnect). Re-raise to the outer
+                        # except so we reconnect with a fresh token.
+                        raise
+                    except psycopg.Error as e:
+                        # Statement-level (constraint violation, deadlock).
+                        # Don't kill the run; log and continue.
+                        print(f"DB error (continuing): {e}")
+
+                    now = time.time()
+                    if now - last_log >= 10:
+                        elapsed = now - start
+                        print(
+                            f"[{elapsed:8.1f}s] ops={op_count:7d} "
+                            f"pending={len(state.pending_orders):4d} "
+                            f"paid={len(state.paid_orders):4d} "
+                            f"shipped={len(state.shipped_orders):4d}"
+                        )
+                        last_log = now
+
+                    time.sleep(sleep_interval)
+        except psycopg.OperationalError as e:
+            if not forever:
                 print(f"DB error: {e} -- ending simulation")
                 break
+            print(f"DB connection lost ({e}); reconnecting in 2s...")
+            time.sleep(2)
+            continue
 
-            now = time.time()
-            if now - last_log >= 10:
-                elapsed = now - start
-                print(
-                    f"[{elapsed:6.1f}s] ops={op_count:5d} "
-                    f"pending={len(state.pending_orders):4d} "
-                    f"paid={len(state.paid_orders):4d} "
-                    f"shipped={len(state.shipped_orders):4d}"
-                )
-                last_log = now
+        # We get here either because:
+        #   - bounded mode reached end of duration cleanly, or
+        #   - forever mode hit the proactive-refresh window.
+        # Bounded mode exits; forever mode loops to mint a fresh token.
+        if not forever:
+            break
 
-            time.sleep(sleep_interval)
-
-        print(f"Done. Total operations: {op_count}")
+    print(f"Done. Total operations: {op_count}")
 
 
 def main() -> None:
@@ -323,7 +392,11 @@ def main() -> None:
         "--duration",
         type=int,
         default=60,
-        help="How long to run in seconds (default: 60)",
+        help=(
+            "How long to run in seconds (default: 60). "
+            "Pass 0 or negative to run indefinitely with auto-reconnect "
+            "on DSQL auth-token expiry (used by the Fargate deployment)."
+        ),
     )
     parser.add_argument(
         "--rate", type=float, default=5.0, help="Target ops/sec (default: 5)"

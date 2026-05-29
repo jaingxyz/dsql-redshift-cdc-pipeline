@@ -42,6 +42,20 @@ stack_output() {
         | tr -d '[:space:]'
 }
 
+# Same as stack_output but takes the stack name as the first arg. Used by
+# scripts that touch multiple stacks (e.g. 05-deploy-simulator.sh reads
+# from the simulator stack while STACK_NAME points at the base stack).
+stack_output_from() {
+    local stack="$1"
+    local key="$2"
+    aws cloudformation describe-stacks \
+        --stack-name "${stack}" \
+        --region "${AWS_REGION}" \
+        --query "Stacks[0].Outputs[?OutputKey=='${key}'].OutputValue" \
+        --output text 2>/dev/null \
+        | tr -d '[:space:]'
+}
+
 # Require a command to be on PATH.
 require() {
     command -v "$1" >/dev/null 2>&1 || err "$1 is not installed (required by this script)"
