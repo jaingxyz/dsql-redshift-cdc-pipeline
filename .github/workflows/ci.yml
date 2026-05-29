@@ -63,7 +63,9 @@ jobs:
           cache: pip
 
       - name: Install cfn-lint
-        run: pip install cfn-lint==1.21.0
+        # 1.51+ knows AWS::DSQL::Cluster. Older versions (e.g. 1.21) error
+        # with E3006 "Resource type does not exist". Don't downgrade.
+        run: pip install cfn-lint==1.51.2
 
       - name: Lint CloudFormation template
         run: cfn-lint infra/cloudformation.yaml
