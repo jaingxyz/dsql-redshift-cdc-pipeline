@@ -1,13 +1,17 @@
 #!/usr/bin/env bash
-# Deploy the always-on order simulator stack:
-#   1. Deploy cloudformation-simulator.yaml to provision ECR + VPC + ECS
-#   2. Build the simulator container image (linux/arm64)
-#   3. Push it to the just-created ECR repo
-#   4. Force a new ECS deployment so the service picks up the image
+# Deploy the simulator infrastructure (ECR + VPC + Fargate cluster + service +
+# Budget + GitHub OIDC role). The container IMAGE itself is NOT built here —
+# that's done by .github/workflows/build-simulator.yml on push to main.
 #
-# Idempotent: re-running rebuilds + redeploys; the service rolls forward.
+# Why split the build out? Building containers on a developer laptop creates
+# a hidden dependency on Docker Desktop being installed and running. The
+# CFN-managed OIDC role lets GitHub Actions push to ECR with no shared
+# secrets, and the ECS service auto-redeploys on each new image. Net effect:
+# this script provisions, GHA does the rest.
 #
-# Required tools: aws, docker (with buildx)
+# Idempotent: re-running just updates the CFN stack.
+#
+# Required tools: aws
 # Required env: AWS credentials configured for the same account where
 #   01-deploy-cfn.sh deployed the base stack.
 #
@@ -16,9 +20,11 @@
 #   AWS_REGION                must match the base stack's region
 #   SIMULATOR_STACK_NAME      ${PROJECT_NAME}-simulator
 #   IMAGE_REPO_NAME           dsql-cdc-simulator
-#   IMAGE_TAG                 latest (override for blue/green)
+#   IMAGE_TAG                 latest
 #   TARGET_RATE               1     (orders/sec; > 1 raises Redshift bill)
 #   MONTHLY_BUDGET_USD        200
+#   GITHUB_REPO               jaingxyz/dsql-redshift-cdc-pipeline
+#                             (must match the repo running the workflow)
 set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck disable=SC1091
@@ -29,19 +35,16 @@ source "${SCRIPT_DIR}/_lib.sh"
 : "${IMAGE_TAG:=latest}"
 : "${TARGET_RATE:=1}"
 : "${MONTHLY_BUDGET_USD:=200}"
+: "${GITHUB_REPO:=jaingxyz/dsql-redshift-cdc-pipeline}"
 
 require aws
-require docker
 check_aws_creds
 
-ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
-ECR_URI="${ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com/${IMAGE_REPO_NAME}"
-
 # -----------------------------------------------------------------------------
-# 1. Deploy / update the simulator stack.
-# We deploy BEFORE building the image because the stack creates the ECR repo.
-# The ECS task references ${IMAGE_TAG}; until we push, the service will fail
-# to pull and ECS will keep retrying — that's fine, the next steps fix it.
+# Deploy / update the simulator infrastructure stack.
+# Until the GHA workflow pushes its first image, the ECS service will fail to
+# pull (the task references :latest in an empty ECR repo) and Fargate will
+# keep retrying. That's expected and self-resolves once the workflow runs.
 # -----------------------------------------------------------------------------
 log "Deploying CloudFormation stack ${SIMULATOR_STACK_NAME}..."
 aws cloudformation deploy \
@@ -53,67 +56,33 @@ aws cloudformation deploy \
         "ImageTag=${IMAGE_TAG}" \
         "TargetRate=${TARGET_RATE}" \
         "MonthlyBudgetUsd=${MONTHLY_BUDGET_USD}" \
+        "GitHubRepo=${GITHUB_REPO}" \
     --capabilities CAPABILITY_NAMED_IAM \
     --region "${AWS_REGION}" \
     --no-fail-on-empty-changeset
 ok "Simulator stack deployed"
 
-# -----------------------------------------------------------------------------
-# 2. Build the container image for arm64 (Graviton Fargate).
-# -----------------------------------------------------------------------------
-APP_DIR="$(cd "${SCRIPT_DIR}/../../app" && pwd)"
-log "Building simulator image at ${APP_DIR} for linux/arm64..."
-
-# Buildx setup is idempotent; this creates the builder if it doesn't exist.
-docker buildx inspect dsql-cdc-builder >/dev/null 2>&1 \
-    || docker buildx create --name dsql-cdc-builder --use >/dev/null
-
-# -----------------------------------------------------------------------------
-# 3. Authenticate Docker against ECR and push the image.
-# -----------------------------------------------------------------------------
-log "Logging Docker into ECR..."
-aws ecr get-login-password --region "${AWS_REGION}" \
-    | docker login --username AWS --password-stdin \
-        "${ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com"
-ok "ECR login OK"
-
-log "Building and pushing ${ECR_URI}:${IMAGE_TAG}..."
-docker buildx build \
-    --platform linux/arm64 \
-    --tag "${ECR_URI}:${IMAGE_TAG}" \
-    --push \
-    "${APP_DIR}"
-ok "Image pushed"
-
-# -----------------------------------------------------------------------------
-# 4. Force the ECS service to pick up the new image.
-# Without this, ECS would only redeploy on a task-definition change. Since we
-# reused the :latest tag, the task definition is unchanged but the image
-# behind it isn't — force-new-deployment makes ECS pull again.
-# -----------------------------------------------------------------------------
 CLUSTER_NAME=$(stack_output_from "${SIMULATOR_STACK_NAME}" EcsClusterName)
 SERVICE_NAME=$(stack_output_from "${SIMULATOR_STACK_NAME}" ServiceName)
 LOG_GROUP=$(stack_output_from "${SIMULATOR_STACK_NAME}" LogGroupName)
-
-log "Forcing new ECS deployment on ${CLUSTER_NAME}/${SERVICE_NAME}..."
-aws ecs update-service \
-    --cluster "${CLUSTER_NAME}" \
-    --service "${SERVICE_NAME}" \
-    --force-new-deployment \
-    --region "${AWS_REGION}" \
-    --no-cli-pager \
-    --query 'service.{status: status, desiredCount: desiredCount, runningCount: runningCount}' \
-    --output table
-ok "ECS deployment triggered"
+ROLE_ARN=$(stack_output_from "${SIMULATOR_STACK_NAME}" GitHubDeployRoleArn)
 
 cat <<EOF
 
-Simulator deploy done.
+Simulator infra is up. The container image is built by GitHub Actions:
 
-Watch the simulator's stdout (it logs throughput every 10s):
+  Workflow: .github/workflows/build-simulator.yml
+  Trigger:  push to main touching app/Dockerfile or app/order_simulator.py,
+            or via the Actions tab "Run workflow" button.
+  Auth:     short-lived OIDC token assuming ${ROLE_ARN}
+
+To kick off the first build, commit + push these files (or click
+"Run workflow" once the workflow file exists on main).
+
+Watch the simulator's stdout once the image is up:
   aws logs tail "${LOG_GROUP}" --follow --region "${AWS_REGION}"
 
-Stop the simulator (without removing infrastructure):
+Pause the simulator (without removing infrastructure):
   aws ecs update-service --cluster "${CLUSTER_NAME}" \\
     --service "${SERVICE_NAME}" --desired-count 0 --region "${AWS_REGION}"
 

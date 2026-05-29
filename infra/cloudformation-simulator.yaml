@@ -65,6 +65,15 @@ Parameters:
     AllowedValues: ["512", "1024", "2048"]
     Description: Fargate task memory MiB (must be valid pair with TaskCpu).
 
+  GitHubRepo:
+    Type: String
+    Default: jaingxyz/dsql-redshift-cdc-pipeline
+    Description: >
+      GitHub owner/repo allowed to assume the deploy role via OIDC. Only
+      the `main` branch and PRs against `main` are authorized; other refs
+      are denied by the role's trust policy condition.
+    AllowedPattern: "^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$"
+
 Resources:
 
   # =========================================================================
@@ -96,6 +105,77 @@ Resources:
               "action": { "type": "expire" }
             }]
           }
+
+  # =========================================================================
+  # GitHub Actions OIDC: allows the GitHub workflow to assume an IAM role
+  # in this account (no long-lived secrets in GHA). Trust is scoped to
+  # the configured repo + ref (main branch and PRs against main).
+  #
+  # ClientIdList must be exactly "sts.amazonaws.com" — the audience GHA
+  # tokens are issued for. ThumbprintList is GitHub's CA cert thumbprint;
+  # AWS no longer validates it as of 2023 but the field is still required.
+  # =========================================================================
+  GitHubOidcProvider:
+    Type: AWS::IAM::OIDCProvider
+    Properties:
+      Url: https://token.actions.githubusercontent.com
+      ClientIdList:
+        - sts.amazonaws.com
+      ThumbprintList:
+        - ffffffffffffffffffffffffffffffffffffffff
+
+  # Role that GitHub Actions assumes via OIDC. Permissions are the union
+  # of what the build workflow needs:
+  #   - ECR: GetAuthorizationToken (account-wide), push/pull on the
+  #     simulator repo only
+  #   - ECS: update-service on the simulator service only
+  #   - ELB / passrole: needed by ECS for force-new-deployment
+  GitHubDeployRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "${ProjectName}-gha-deploy-role"
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Federated: !Ref GitHubOidcProvider
+            Action: sts:AssumeRoleWithWebIdentity
+            Condition:
+              StringEquals:
+                token.actions.githubusercontent.com:aud: sts.amazonaws.com
+              StringLike:
+                # Allow main branch and PRs targeting main. Anything else
+                # (other branches, tags, forks) is denied.
+                token.actions.githubusercontent.com:sub:
+                  - !Sub "repo:${GitHubRepo}:ref:refs/heads/main"
+                  - !Sub "repo:${GitHubRepo}:pull_request"
+      Policies:
+        - PolicyName: EcrPushAndEcsDeploy
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              # ECR: GetAuthorizationToken is account-wide (no resource);
+              # everything else is scoped to this one repo.
+              - Effect: Allow
+                Action: ecr:GetAuthorizationToken
+                Resource: "*"
+              - Effect: Allow
+                Action:
+                  - ecr:BatchCheckLayerAvailability
+                  - ecr:BatchGetImage
+                  - ecr:CompleteLayerUpload
+                  - ecr:GetDownloadUrlForLayer
+                  - ecr:InitiateLayerUpload
+                  - ecr:PutImage
+                  - ecr:UploadLayerPart
+                Resource: !GetAtt SimulatorEcrRepo.Arn
+              # ECS: just enough to force-redeploy the simulator service.
+              - Effect: Allow
+                Action:
+                  - ecs:UpdateService
+                  - ecs:DescribeServices
+                Resource: !Sub "arn:${AWS::Partition}:ecs:${AWS::Region}:${AWS::AccountId}:service/${EcsCluster}/*"
 
   # =========================================================================
   # Minimal VPC: 1 VPC, 2 public subnets across 2 AZs, IGW, public route.
@@ -357,3 +437,9 @@ Outputs:
     Value: !Ref TaskLogGroup
     Export:
       Name: !Sub "${ProjectName}-sim-log-group"
+
+  GitHubDeployRoleArn:
+    Description: ARN of the IAM role GitHub Actions assumes via OIDC
+    Value: !GetAtt GitHubDeployRole.Arn
+    Export:
+      Name: !Sub "${ProjectName}-sim-gha-role-arn"

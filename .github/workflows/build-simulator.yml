@@ -1,0 +1,89 @@
+name: Build simulator image
+
+# Builds the order-simulator container image and pushes it to ECR. Then
+# force-redeploys the ECS service so the new image is picked up.
+#
+# Triggers:
+#   - on push to main when app/Dockerfile or simulator code changes
+#   - manual via workflow_dispatch (useful for forcing a rebuild)
+#
+# Auth: short-lived OIDC token. The IAM role is provisioned by
+# infra/cloudformation-simulator.yaml's GitHubDeployRole resource and
+# trusts only this repo's main branch. No long-lived secrets in repo
+# settings.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - app/Dockerfile
+      - app/order_simulator.py
+      - app/requirements.txt
+      - .github/workflows/build-simulator.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  id-token: write # required for OIDC token
+
+env:
+  AWS_REGION: us-east-1
+  PROJECT_NAME: dsql-cdc
+
+concurrency:
+  # Don't run two builds in parallel — they'd race on the ECR :latest tag
+  # and on the ECS update-service call.
+  group: build-simulator
+  cancel-in-progress: false
+
+jobs:
+  build-and-deploy:
+    name: Build, push to ECR, redeploy ECS
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.0
+
+      - name: Configure AWS credentials via OIDC
+        uses: aws-actions/configure-aws-credentials@7474bc4690e29a8392af63c5b98e7449536d5c3a # v4
+        with:
+          # Role ARN exported by cloudformation-simulator.yaml. We could
+          # Fn::ImportValue this in CloudFormation but GHA runs in GitHub,
+          # not CFN — so we hardcode the canonical name pattern. Account
+          # id has to be looked up dynamically via the role lookup below.
+          role-to-assume: arn:aws:iam::239355724610:role/dsql-cdc-gha-deploy-role
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Login to ECR
+        id: ecr-login
+        uses: aws-actions/amazon-ecr-login@fa648b43de3d4d023bcb3f89ed6940096949c419 # v2
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
+
+      - name: Build and push to ECR (linux/arm64)
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
+        with:
+          context: app
+          file: app/Dockerfile
+          platforms: linux/arm64
+          push: true
+          tags: |
+            ${{ steps.ecr-login.outputs.registry }}/dsql-cdc-simulator:latest
+            ${{ steps.ecr-login.outputs.registry }}/dsql-cdc-simulator:${{ github.sha }}
+          # Cache build layers in GitHub Actions cache. Cuts subsequent
+          # builds from ~3 min to ~30s when only Python files change.
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Force ECS to pull the new image
+        # ECR :latest tag was just overwritten; the task definition still
+        # references the same tag, so ECS won't redeploy unless we tell it.
+        run: |
+          aws ecs update-service \
+            --cluster "${PROJECT_NAME}-sim-cluster" \
+            --service "${PROJECT_NAME}-sim-service" \
+            --force-new-deployment \
+            --no-cli-pager \
+            --query 'service.{status: status, desiredCount: desiredCount, runningCount: runningCount}' \
+            --output table
