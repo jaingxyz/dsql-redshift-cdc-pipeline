@@ -1,0 +1,6 @@
+# Runtime dependencies for the order simulator (and any local development
+# against this repo). The Lambda function uses only `boto3`, which is
+# bundled in the Lambda runtime — no Lambda-side install needed.
+
+boto3>=1.34.0
+psycopg[binary]>=3.1.0

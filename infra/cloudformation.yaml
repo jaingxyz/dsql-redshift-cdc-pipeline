@@ -1,0 +1,277 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >
+  DSQL -> Redshift CDC pipeline infrastructure.
+  Creates the Aurora DSQL cluster, Kinesis stream, IAM roles, Redshift
+  Serverless namespace and workgroup, Lambda function shell, and the
+  Kinesis event source mapping.
+
+  NOT created by this template (handled by scripts/ instead, since they
+  require post-stack operations or use APIs not yet covered by CFN):
+    * The DSQL CDC stream that links the cluster to the Kinesis stream
+      (scripts/02-create-cdc-stream.sh) — DSQL CDC is in public preview
+      and does not yet have a CloudFormation resource type
+    * Source and target schemas (scripts/03-load-schemas.sh)
+    * The real Lambda code (scripts/04-deploy-lambda-code.sh)
+
+Parameters:
+  ProjectName:
+    Type: String
+    Default: dsql-cdc
+    Description: Short prefix used for resource names. Must be DNS-friendly.
+    AllowedPattern: "^[a-z][a-z0-9-]{2,30}$"
+
+  DsqlDeletionProtection:
+    Type: String
+    Default: "true"
+    AllowedValues: ["true", "false"]
+    Description: >
+      Whether deletion protection is enabled on the DSQL cluster.
+      Default true to prevent accidental data loss. Set to "false" for
+      ephemeral test stacks where teardown.sh should remove the cluster.
+
+  RedshiftBaseCapacity:
+    Type: Number
+    Default: 8
+    Description: Redshift Serverless workgroup base capacity (RPUs). 8 is the minimum.
+    MinValue: 8
+    MaxValue: 512
+
+Resources:
+
+  # =========================================================================
+  # Aurora DSQL cluster (source of truth for operational data)
+  # =========================================================================
+  DsqlCluster:
+    Type: AWS::DSQL::Cluster
+    Properties:
+      DeletionProtectionEnabled: !Ref DsqlDeletionProtection
+      Tags:
+        - Key: Project
+          Value: !Ref ProjectName
+
+  # =========================================================================
+  # Kinesis Data Stream (on-demand mode = fully serverless)
+  # =========================================================================
+  CdcStream:
+    Type: AWS::Kinesis::Stream
+    Properties:
+      Name: !Sub "${ProjectName}-stream"
+      StreamModeDetails:
+        StreamMode: ON_DEMAND
+      RetentionPeriodHours: 24
+      Tags:
+        - Key: Project
+          Value: !Ref ProjectName
+
+  # =========================================================================
+  # IAM role assumed by Aurora DSQL CDC service to write to Kinesis
+  # Trust policy uses ArnLike against the stream ARN pattern under this
+  # cluster — least privilege, matching the AWS DSQL CDC docs:
+  # https://docs.aws.amazon.com/aurora-dsql/latest/userguide/cdc-iam.html
+  # =========================================================================
+  DsqlCdcKinesisRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "${ProjectName}-dsql-cdc-kinesis-role"
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: dsql.amazonaws.com
+            Action: sts:AssumeRole
+            Condition:
+              StringEquals:
+                aws:SourceAccount: !Ref AWS::AccountId
+              ArnLike:
+                aws:SourceArn: !Sub
+                  - "${ClusterArn}/stream/*"
+                  - ClusterArn: !GetAtt DsqlCluster.ResourceArn
+      Policies:
+        - PolicyName: KinesisWrite
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - kinesis:PutRecord
+                  - kinesis:PutRecords
+                  - kinesis:DescribeStreamSummary
+                  - kinesis:ListShards
+                Resource: !GetAtt CdcStream.Arn
+
+  # =========================================================================
+  # Redshift Serverless: namespace + workgroup
+  # ManageAdminPassword=true lets AWS generate and rotate the password in
+  # Secrets Manager. We never need it directly because the Lambda uses the
+  # Data API with IAM auth.
+  #
+  # Note: no DeletionPolicy is set on these resources because this is a
+  # demo stack — teardown.sh is meant to remove everything. For production,
+  # add DeletionPolicy: Snapshot to RedshiftNamespace.
+  # =========================================================================
+  RedshiftNamespace:
+    Type: AWS::RedshiftServerless::Namespace
+    Properties:
+      NamespaceName: !Sub "${ProjectName}-ns"
+      DbName: dev
+      AdminUsername: admin
+      ManageAdminPassword: true
+      Tags:
+        - Key: Project
+          Value: !Ref ProjectName
+
+  RedshiftWorkgroup:
+    Type: AWS::RedshiftServerless::Workgroup
+    Properties:
+      WorkgroupName: !Sub "${ProjectName}-wg"
+      NamespaceName: !Ref RedshiftNamespace
+      BaseCapacity: !Ref RedshiftBaseCapacity
+      PubliclyAccessible: false
+      Tags:
+        - Key: Project
+          Value: !Ref ProjectName
+
+  # =========================================================================
+  # Lambda execution role
+  # Permissions:
+  #   - Kinesis: managed policy for reading the CDC stream
+  #   - Logs: managed basic execution policy
+  #   - Redshift Data API: execute statements + describe results
+  # =========================================================================
+  LambdaExecRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "${ProjectName}-lambda-role"
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaKinesisExecutionRole
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: RedshiftDataAPI
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              # Redshift Data API actions do not support resource-level
+              # permissions. Resource: "*" is the only valid value here.
+              # See: https://docs.aws.amazon.com/service-authorization/latest/reference/list_amazonredshiftdataapi.html
+              - Effect: Allow
+                Action:
+                  - redshift-data:ExecuteStatement
+                  - redshift-data:BatchExecuteStatement
+                  - redshift-data:DescribeStatement
+                  - redshift-data:GetStatementResult
+                Resource: "*"
+              - Effect: Allow
+                Action:
+                  - redshift-serverless:GetCredentials
+                Resource: !GetAtt RedshiftWorkgroup.Workgroup.WorkgroupArn
+
+  # =========================================================================
+  # CDC processor Lambda function
+  # Real code is deployed by scripts/04-deploy-lambda-code.sh after the stack
+  # is up. The placeholder here just lets us create the function + event
+  # source mapping atomically.
+  # =========================================================================
+  CdcProcessorFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub "${ProjectName}-processor"
+      Runtime: python3.11
+      Handler: cdc_processor.lambda_handler
+      Role: !GetAtt LambdaExecRole.Arn
+      # Headroom for synchronous Redshift describe-statement polling:
+      # worst case is BatchSize/ROWS_PER_CHUNK chunks * STATEMENT_POLL_TIMEOUT_S.
+      Timeout: 120
+      MemorySize: 256
+      Environment:
+        Variables:
+          REDSHIFT_WORKGROUP: !Ref RedshiftWorkgroup
+          REDSHIFT_DATABASE: dev
+          ROWS_PER_CHUNK: "40"
+          STATEMENT_POLL_TIMEOUT_S: "20"
+      Code:
+        ZipFile: |
+          # PLACEHOLDER. Real code is deployed by scripts/04-deploy-lambda-code.sh.
+          # If you see this in a Lambda invocation, the deploy step did not run.
+          def lambda_handler(event, context):
+              return {"statusCode": 200, "body": "placeholder"}
+
+  CdcEventSource:
+    Type: AWS::Lambda::EventSourceMapping
+    Properties:
+      EventSourceArn: !GetAtt CdcStream.Arn
+      FunctionName: !Ref CdcProcessorFunction
+      StartingPosition: LATEST
+      # BatchSize: max records delivered per invocation. The Lambda chunks
+      # internally to stay within Redshift Data API's 200-parameter limit
+      # (40 records * 5 params each), so values up to ~400 work.
+      BatchSize: 100
+      MaximumBatchingWindowInSeconds: 5
+      # Operational resilience: bound retries on poison records so they
+      # don't block shard processing forever (default would retry until
+      # the record expires from the stream).
+      MaximumRetryAttempts: 5
+      BisectBatchOnFunctionError: true
+      Enabled: true
+
+Outputs:
+  DsqlClusterIdentifier:
+    Description: Aurora DSQL cluster identifier (the short ID, not the ARN)
+    Value: !GetAtt DsqlCluster.Identifier
+    Export:
+      Name: !Sub "${ProjectName}-dsql-cluster-id"
+
+  DsqlClusterArn:
+    Description: Aurora DSQL cluster ARN (used by the CDC stream IAM trust policy)
+    Value: !GetAtt DsqlCluster.ResourceArn
+    Export:
+      Name: !Sub "${ProjectName}-dsql-cluster-arn"
+
+  DsqlClusterEndpoint:
+    Description: Hostname for psql/PostgreSQL clients
+    Value: !GetAtt DsqlCluster.Endpoint
+    Export:
+      Name: !Sub "${ProjectName}-dsql-cluster-endpoint"
+
+  KinesisStreamName:
+    Description: Name of the Kinesis stream that receives CDC events
+    Value: !Ref CdcStream
+    Export:
+      Name: !Sub "${ProjectName}-kinesis-stream-name"
+
+  KinesisStreamArn:
+    Description: ARN of the Kinesis stream (needed when creating the DSQL CDC stream)
+    Value: !GetAtt CdcStream.Arn
+    Export:
+      Name: !Sub "${ProjectName}-kinesis-stream-arn"
+
+  DsqlCdcRoleArn:
+    Description: IAM role ARN that DSQL CDC assumes to write to Kinesis
+    Value: !GetAtt DsqlCdcKinesisRole.Arn
+    Export:
+      Name: !Sub "${ProjectName}-dsql-cdc-role-arn"
+
+  RedshiftWorkgroupName:
+    Description: Redshift Serverless workgroup name (use with Redshift Data API)
+    Value: !Ref RedshiftWorkgroup
+    Export:
+      Name: !Sub "${ProjectName}-redshift-workgroup"
+
+  RedshiftDatabase:
+    Description: Default database in the Redshift namespace
+    Value: dev
+    Export:
+      Name: !Sub "${ProjectName}-redshift-database"
+
+  LambdaFunctionName:
+    Description: CDC processor Lambda function name
+    Value: !Ref CdcProcessorFunction
+    Export:
+      Name: !Sub "${ProjectName}-lambda-function-name"

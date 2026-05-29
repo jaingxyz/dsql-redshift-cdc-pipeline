@@ -1,0 +1,41 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+.eggs/
+build/
+dist/
+.venv/
+venv/
+env/
+
+# OS / editor
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.swp
+*~
+
+# Build artifacts
+*.zip
+*.tar.gz
+
+# Secrets / credentials (defense in depth — should never be committed)
+.env
+.env.*
+*.pem
+*.key
+credentials*
+aws-credentials*
+trust-policy.json
+permissions-policy.json
+
+# Bootstrap state — contains live cluster/stream identifiers
+infra/.env.bootstrap
+
+# Local override / scratch
+local/
+scratch/
+notes/

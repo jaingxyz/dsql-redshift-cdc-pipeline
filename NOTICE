@@ -1,0 +1,64 @@
+DSQL → Redshift CDC Pipeline (sample)
+Copyright 2026 jaingxyz
+
+Licensed under the GNU Affero General Public License, Version 3 (AGPL-3.0).
+See LICENSE for the full license text. This is a reference / sample
+repository — not intended for direct production use.
+
+================================================================================
+Acknowledgements
+================================================================================
+
+This sample is built on top of, and inspired by, official AWS reference
+material and open-source AWS Labs projects. The structure of the CDC
+pipeline (DSQL native CDC → Kinesis → Lambda → Redshift) is derived from
+patterns published by AWS.
+
+Primary references:
+
+* "Getting started with Change Data Capture in Amazon Aurora DSQL"
+  by Vijay Karumajji, AWS Database Blog, May 2026.
+  https://aws.amazon.com/blogs/database/getting-started-with-change-data-capture-in-amazon-aurora-dsql/
+  The DSQL CDC setup commands, IAM trust policy template, and CDC event
+  format documentation in this repository are adapted from this post.
+
+* "Accelerating SQL analytics with Amazon Redshift MCP server"
+  AWS Big Data Blog.
+  https://aws.amazon.com/blogs/big-data/accelerating-sql-analytics-with-amazon-redshift-mcp-server/
+
+* awslabs/agent-plugins
+  https://github.com/awslabs/agent-plugins
+  The `databases-on-aws` plugin / `dsql` agent skill referenced in the
+  blog post is published by AWS Labs under Apache 2.0.
+
+* awslabs/mcp
+  https://github.com/awslabs/mcp
+  The Aurora DSQL MCP server (src/aurora-dsql-mcp-server) and Redshift
+  MCP server (src/redshift-mcp-server) referenced in the blog post are
+  published by AWS Labs under Apache 2.0. The DSQL schema in this sample
+  was validated using the `dsql_lint` tool from the Aurora DSQL MCP server.
+
+* AWS Aurora DSQL documentation
+  https://docs.aws.amazon.com/aurora-dsql/latest/userguide/cdc-streams.html
+
+* Amazon Redshift documentation
+  https://docs.aws.amazon.com/redshift/
+
+================================================================================
+AI-assisted authorship disclosure
+================================================================================
+
+This sample, including code, schemas, documentation, and the accompanying
+blog post, was authored with the assistance of an AI coding agent
+(Anthropic Claude via the Kiro CLI). All output was reviewed, tested, and
+edited by a human author before publication. Errors are the author's.
+
+================================================================================
+Trademarks
+================================================================================
+
+Amazon Web Services, AWS, Aurora, DSQL, Redshift, Lambda, and Kinesis
+are trademarks of Amazon.com, Inc. or its affiliates.
+Anthropic and Claude are trademarks of Anthropic, PBC. Use of these names
+in this repository is for descriptive and reference purposes only and
+does not imply endorsement.
