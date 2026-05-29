@@ -1,5 +1,10 @@
 # DSQL → Redshift CDC Pipeline
 
+[![CI](https://github.com/jaingxyz/dsql-redshift-cdc-pipeline/actions/workflows/ci.yml/badge.svg)](https://github.com/jaingxyz/dsql-redshift-cdc-pipeline/actions/workflows/ci.yml)
+[![CodeQL](https://github.com/jaingxyz/dsql-redshift-cdc-pipeline/actions/workflows/codeql.yml/badge.svg)](https://github.com/jaingxyz/dsql-redshift-cdc-pipeline/actions/workflows/codeql.yml)
+[![Semgrep](https://github.com/jaingxyz/dsql-redshift-cdc-pipeline/actions/workflows/semgrep.yml/badge.svg)](https://github.com/jaingxyz/dsql-redshift-cdc-pipeline/actions/workflows/semgrep.yml)
+[![License: AGPL v3+](https://img.shields.io/badge/license-AGPL--3.0--or--later-blue)](./LICENSE)
+
 A fully serverless reference pipeline that streams Change Data Capture (CDC)
 events from **Amazon Aurora DSQL** through **Amazon Kinesis Data Streams** and
 **AWS Lambda** into **Amazon Redshift Serverless** — with infrastructure-as-code,
