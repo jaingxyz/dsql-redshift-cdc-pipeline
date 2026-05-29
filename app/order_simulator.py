@@ -27,13 +27,11 @@ import argparse
 import os
 import random
 import time
-import uuid
 from contextlib import contextmanager
 from dataclasses import dataclass
 
 import boto3
 import psycopg
-from psycopg import sql
 
 REGION = os.environ.get("AWS_REGION", "us-east-1")
 CLUSTER_ID = os.environ["DSQL_CLUSTER_ID"]
@@ -41,8 +39,8 @@ CLUSTER_ID = os.environ["DSQL_CLUSTER_ID"]
 # Tunables
 SEED_CUSTOMERS = 200
 SEED_PRODUCTS = 50
-ABANDON_RATE = 0.10        # 10% of orders never advance from pending
-CANCEL_RATE = 0.05         # 5% of paid orders get cancelled
+ABANDON_RATE = 0.10  # 10% of orders never advance from pending
+CANCEL_RATE = 0.05  # 5% of paid orders get cancelled
 MAX_ITEMS_PER_ORDER = 4
 
 CATEGORIES = ["apparel", "electronics", "home", "books", "toys", "beauty"]
@@ -53,15 +51,16 @@ PAYMENT_METHODS = ["card", "paypal", "applepay", "googlepay"]
 @dataclass
 class SimulatorState:
     customer_ids: list[str]
-    product_catalog: list[dict]   # {id, price_cents, stock_qty}
-    pending_orders: list[str]     # order ids awaiting payment
-    paid_orders: list[str]        # order ids ready to ship
-    shipped_orders: list[str]     # order ids in transit
+    product_catalog: list[dict]  # {id, price_cents, stock_qty}
+    pending_orders: list[str]  # order ids awaiting payment
+    paid_orders: list[str]  # order ids ready to ship
+    shipped_orders: list[str]  # order ids in transit
 
 
 # ---------------------------------------------------------------------------
 # Connection management
 # ---------------------------------------------------------------------------
+
 
 def _generate_password() -> str:
     """Get a short-lived auth token from DSQL."""
@@ -94,13 +93,16 @@ def dsql_connection():
 # Seeding
 # ---------------------------------------------------------------------------
 
+
 def seed_catalog(conn) -> list[dict]:
     """Insert product catalog if empty. Returns the catalog."""
     with conn.cursor() as cur:
         cur.execute("SELECT COUNT(*) FROM products")
         if cur.fetchone()[0] >= SEED_PRODUCTS:
-            cur.execute("SELECT id, price_cents, stock_qty FROM products LIMIT %s",
-                        (SEED_PRODUCTS,))
+            cur.execute(
+                "SELECT id, price_cents, stock_qty FROM products LIMIT %s",
+                (SEED_PRODUCTS,),
+            )
             return [
                 {"id": str(r[0]), "price_cents": r[1], "stock_qty": r[2]}
                 for r in cur.fetchall()
@@ -111,7 +113,7 @@ def seed_catalog(conn) -> list[dict]:
             sku = f"SKU-{i:05d}"
             name = f"Sample Product {i}"
             category = random.choice(CATEGORIES)
-            price = random.randint(500, 50_000)   # $5 to $500
+            price = random.randint(500, 50_000)  # $5 to $500
             stock = random.randint(50, 1000)
             cur.execute(
                 """
@@ -122,7 +124,9 @@ def seed_catalog(conn) -> list[dict]:
                 (sku, name, category, price, stock),
             )
             row_id = cur.fetchone()[0]
-            catalog.append({"id": str(row_id), "price_cents": price, "stock_qty": stock})
+            catalog.append(
+                {"id": str(row_id), "price_cents": price, "stock_qty": stock}
+            )
         print(f"Seeded {SEED_PRODUCTS} products")
         return catalog
 
@@ -157,11 +161,13 @@ def seed_customers(conn) -> list[str]:
 # Order lifecycle actions
 # ---------------------------------------------------------------------------
 
+
 def create_order(conn, state: SimulatorState) -> None:
     """Place a new pending order with 1-4 items."""
     customer_id = random.choice(state.customer_ids)
-    items = random.sample(state.product_catalog,
-                          k=random.randint(1, MAX_ITEMS_PER_ORDER))
+    items = random.sample(
+        state.product_catalog, k=random.randint(1, MAX_ITEMS_PER_ORDER)
+    )
 
     total = sum(p["price_cents"] for p in items)
     country = random.choice(COUNTRIES)
@@ -253,6 +259,7 @@ def deliver_order(conn, state: SimulatorState) -> None:
 # Main loop
 # ---------------------------------------------------------------------------
 
+
 def run_simulation(duration_sec: int, target_rate: float) -> None:
     sleep_interval = 1.0 / target_rate if target_rate > 0 else 1.0
 
@@ -312,12 +319,18 @@ def run_simulation(duration_sec: int, target_rate: float) -> None:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--duration", type=int, default=60,
-                        help="How long to run in seconds (default: 60)")
-    parser.add_argument("--rate", type=float, default=5.0,
-                        help="Target ops/sec (default: 5)")
-    parser.add_argument("--seed-only", action="store_true",
-                        help="Seed catalog and customers, then exit")
+    parser.add_argument(
+        "--duration",
+        type=int,
+        default=60,
+        help="How long to run in seconds (default: 60)",
+    )
+    parser.add_argument(
+        "--rate", type=float, default=5.0, help="Target ops/sec (default: 5)"
+    )
+    parser.add_argument(
+        "--seed-only", action="store_true", help="Seed catalog and customers, then exit"
+    )
     args = parser.parse_args()
 
     if args.seed_only:

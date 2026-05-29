@@ -54,7 +54,9 @@ DATABASE = os.environ["REDSHIFT_DATABASE"]
 
 PARAMS_PER_ROW = 5
 MAX_PARAMS_PER_STATEMENT = 200
-ROWS_PER_CHUNK = int(os.environ.get("ROWS_PER_CHUNK", MAX_PARAMS_PER_STATEMENT // PARAMS_PER_ROW))
+ROWS_PER_CHUNK = int(
+    os.environ.get("ROWS_PER_CHUNK", MAX_PARAMS_PER_STATEMENT // PARAMS_PER_ROW)
+)
 STATEMENT_POLL_TIMEOUT_S = int(os.environ.get("STATEMENT_POLL_TIMEOUT_S", 25))
 
 
@@ -95,13 +97,15 @@ def _build_parameterized_insert(rows: list[dict]) -> tuple[str, list[dict]]:
             f"(:t{i}, :op{i}, :id{i}, JSON_PARSE(:d{i}), "
             f"TIMESTAMP 'epoch' + CAST(:ts{i} AS BIGINT) / 1000.0 * INTERVAL '1 second')"
         )
-        parameters.extend([
-            {"name": f"t{i}",  "value": r["table"]},
-            {"name": f"op{i}", "value": r["op"]},
-            {"name": f"id{i}", "value": str(r["record_id"])},
-            {"name": f"d{i}",  "value": json.dumps(r["row"])},
-            {"name": f"ts{i}", "value": str(r["commit_ts_ms"])},
-        ])
+        parameters.extend(
+            [
+                {"name": f"t{i}", "value": r["table"]},
+                {"name": f"op{i}", "value": r["op"]},
+                {"name": f"id{i}", "value": str(r["record_id"])},
+                {"name": f"d{i}", "value": json.dumps(r["row"])},
+                {"name": f"ts{i}", "value": str(r["commit_ts_ms"])},
+            ]
+        )
 
     sql = (
         "INSERT INTO cdc_events "
@@ -114,7 +118,7 @@ def _build_parameterized_insert(rows: list[dict]) -> tuple[str, list[dict]]:
 def _chunked(items: list, size: int):
     """Yield successive `size`-sized chunks from `items`."""
     for i in range(0, len(items), size):
-        yield items[i:i + size]
+        yield items[i : i + size]
 
 
 def _await_statement(statement_id: str) -> None:
@@ -166,19 +170,23 @@ def lambda_handler(event, context):
             # inserting record_id='' or commit_timestamp=1970-01-01.
             logger.warning(
                 "Skipping op=%s payload with missing id=%r or ts_ms=%r",
-                op, record_id, ts_ms,
+                op,
+                record_id,
+                ts_ms,
             )
             skipped += 1
             continue
 
         source = payload.get("source", {})
-        rows.append({
-            "table": source.get("table", "unknown"),
-            "op": op,
-            "record_id": record_id,
-            "row": row,
-            "commit_ts_ms": ts_ms,
-        })
+        rows.append(
+            {
+                "table": source.get("table", "unknown"),
+                "op": op,
+                "record_id": record_id,
+                "row": row,
+                "commit_ts_ms": ts_ms,
+            }
+        )
 
     if not rows:
         logger.info("No processable records (skipped=%d)", skipped)
@@ -206,7 +214,9 @@ def lambda_handler(event, context):
             # potential duplicates on retry.
             logger.exception(
                 "Chunk %d/%d failed (already-submitted statement_ids=%s)",
-                chunk_index + 1, len(chunks), statement_ids,
+                chunk_index + 1,
+                len(chunks),
+                statement_ids,
             )
             raise
 

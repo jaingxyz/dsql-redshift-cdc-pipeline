@@ -1,0 +1,27 @@
+* text=auto eol=lf
+
+# Shell scripts must be LF, even on Windows checkouts
+*.sh text eol=lf
+*.bash text eol=lf
+
+# Python source must be LF
+*.py text eol=lf
+
+# YAML / JSON / SQL must be LF
+*.yaml text eol=lf
+*.yml  text eol=lf
+*.json text eol=lf
+*.sql  text eol=lf
+
+# Binary
+*.png binary
+*.jpg binary
+*.pdf binary
+*.zip binary
+*.tar.gz binary
+
+# Don't include test/CI cruft in source archives (release tarballs)
+.github      export-ignore
+.gitattributes export-ignore
+.gitignore   export-ignore
+.editorconfig export-ignore

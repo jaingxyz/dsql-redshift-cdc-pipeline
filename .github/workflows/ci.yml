@@ -1,0 +1,69 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  python:
+    name: Python lint
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.0
+
+      - uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.0.0
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install ruff
+        run: pip install ruff==0.7.4
+
+      - name: Lint
+        run: ruff check app/ --output-format=github
+
+      - name: Format check
+        run: ruff format --check app/
+
+  shell:
+    name: shellcheck
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.0
+
+      - name: Run shellcheck
+        # Ubuntu runners ship shellcheck preinstalled; pin to the runner's version.
+        # SC1091 = "could not find sourced file" — _lib.sh is sourced at runtime,
+        # not present at lint time. Suppressed at the directive level.
+        run: |
+          shellcheck --version
+          shellcheck -e SC1091 infra/scripts/*.sh
+
+  cfn:
+    name: cfn-lint
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.0
+
+      - uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.0.0
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install cfn-lint
+        run: pip install cfn-lint==1.21.0
+
+      - name: Lint CloudFormation template
+        run: cfn-lint infra/cloudformation.yaml
