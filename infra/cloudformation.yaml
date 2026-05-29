@@ -199,9 +199,15 @@ Resources:
       Code:
         ZipFile: |
           # PLACEHOLDER. Real code is deployed by scripts/04-deploy-lambda-code.sh.
-          # If you see this in a Lambda invocation, the deploy step did not run.
+          # Raise (not return) — if Kinesis ever invokes this placeholder,
+          # returning 200 would silently advance the iterator past CDC events
+          # that never made it to Redshift. Raising forces the EventSourceMapping
+          # to retry and surfaces the misconfiguration in CloudWatch.
           def lambda_handler(event, context):
-              return {"statusCode": 200, "body": "placeholder"}
+              raise RuntimeError(
+                  "Placeholder Lambda code is running. "
+                  "Run scripts/04-deploy-lambda-code.sh to deploy the real handler."
+              )
 
   CdcEventSource:
     Type: AWS::Lambda::EventSourceMapping
