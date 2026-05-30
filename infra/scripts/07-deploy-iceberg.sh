@@ -31,19 +31,22 @@ require aws
 check_aws_creds
 
 # -----------------------------------------------------------------------------
-# 1. Deploy / update the CFN stack.
+# 1a. Phase 1 deploy: bucket + namespace only. Firehose is held back
+# until the Iceberg table exists; Firehose validates the destination
+# table at create time.
 # -----------------------------------------------------------------------------
-log "Deploying CloudFormation stack ${ICEBERG_STACK_NAME}..."
+log "Phase 1: deploying bucket + namespace..."
 aws cloudformation deploy \
     --stack-name "${ICEBERG_STACK_NAME}" \
     --template-file "${SCRIPT_DIR}/../cloudformation-iceberg.yaml" \
     --parameter-overrides \
         "ProjectName=${PROJECT_NAME}" \
         "BucketSuffix=${ICEBERG_BUCKET_SUFFIX}" \
+        "EnableFirehose=false" \
     --capabilities CAPABILITY_NAMED_IAM \
     --region "${AWS_REGION}" \
     --no-fail-on-empty-changeset
-ok "Iceberg stack deployed"
+ok "Phase 1 deployed (bucket + namespace + IAM)"
 
 BUCKET_ARN=$(stack_output_from "${ICEBERG_STACK_NAME}" TableBucketArn)
 BUCKET_NAME=$(stack_output_from "${ICEBERG_STACK_NAME}" TableBucketName)
@@ -106,9 +109,96 @@ JSON
 fi
 
 # -----------------------------------------------------------------------------
-# 3. Wire Redshift: external schema + UNION view across hot+cold.
-# Run as admin via the admin secret (same pattern as 06-deploy-sagemaker).
+# 2b. Phase 2 deploy: now that the Iceberg table exists, add Firehose.
 # -----------------------------------------------------------------------------
+log "Phase 2: adding Firehose to the stack..."
+aws cloudformation deploy \
+    --stack-name "${ICEBERG_STACK_NAME}" \
+    --template-file "${SCRIPT_DIR}/../cloudformation-iceberg.yaml" \
+    --parameter-overrides \
+        "ProjectName=${PROJECT_NAME}" \
+        "BucketSuffix=${ICEBERG_BUCKET_SUFFIX}" \
+        "EnableFirehose=true" \
+    --capabilities CAPABILITY_NAMED_IAM \
+    --region "${AWS_REGION}" \
+    --no-fail-on-empty-changeset
+ok "Phase 2 deployed (Firehose live)"
+
+# -----------------------------------------------------------------------------
+# 3. Wire Redshift: attach Spectrum role to the namespace, grant Lake
+# Formation read on the federated catalog, then create the external
+# schema. Run DDL as admin via the admin secret.
+# -----------------------------------------------------------------------------
+SPECTRUM_ROLE_ARN=$(stack_output_from "${ICEBERG_STACK_NAME}" RedshiftSpectrumRoleArn)
+[ -n "${SPECTRUM_ROLE_ARN}" ] || err "RedshiftSpectrumRoleArn export missing"
+log "Spectrum role: ${SPECTRUM_ROLE_ARN}"
+
+# 3a. Attach the Spectrum role to the Redshift Serverless namespace.
+# Idempotent: if already attached, this is a no-op (we read existing
+# roles, dedupe, and only call update if the new role isn't there).
+NAMESPACE_NAME=$(aws redshift-serverless get-workgroup \
+    --workgroup-name "${REDSHIFT_WORKGROUP}" \
+    --region "${AWS_REGION}" \
+    --query 'workgroup.namespaceName' --output text)
+EXISTING_ROLES=$(aws redshift-serverless get-namespace \
+    --namespace-name "${NAMESPACE_NAME}" \
+    --region "${AWS_REGION}" \
+    --query 'namespace.iamRoles' --output text)
+if echo "${EXISTING_ROLES}" | grep -q "${SPECTRUM_ROLE_ARN}"; then
+    ok "Spectrum role already attached to namespace"
+else
+    log "Attaching Spectrum role to namespace ${NAMESPACE_NAME}..."
+    # Build the JSON list of roles: existing + new. Each role string
+    # in the API is the bare ARN; we wrap in a JSON array.
+    ROLES_JSON=$(python3 - <<PY
+import json, os
+existing = os.environ.get("EXISTING", "").split() or []
+new = os.environ["NEW"]
+roles = [r for r in existing if r and r != "None"]
+if new not in roles: roles.append(new)
+print(json.dumps(roles))
+PY
+)
+    EXISTING="${EXISTING_ROLES}" NEW="${SPECTRUM_ROLE_ARN}" \
+    aws redshift-serverless update-namespace \
+        --namespace-name "${NAMESPACE_NAME}" \
+        --iam-roles "${ROLES_JSON}" \
+        --default-iam-role-arn "${SPECTRUM_ROLE_ARN}" \
+        --region "${AWS_REGION}" >/dev/null
+    log "Waiting for namespace IAM update to apply..."
+    for _ in $(seq 1 30); do
+        STATUS=$(aws redshift-serverless get-namespace \
+            --namespace-name "${NAMESPACE_NAME}" \
+            --region "${AWS_REGION}" \
+            --query 'namespace.status' --output text)
+        [ "${STATUS}" = "AVAILABLE" ] && break
+        sleep 3
+    done
+    ok "Spectrum role attached"
+fi
+
+# 3b. Grant Lake Formation DESCRIBE+SELECT to the Spectrum role on the
+# bucket-nested federated catalog. Without this, Redshift can call Glue
+# but Lake Formation blocks the actual data read.
+log "Granting Lake Formation permissions to Spectrum role..."
+aws lakeformation grant-permissions \
+    --principal "DataLakePrincipalIdentifier=${SPECTRUM_ROLE_ARN}" \
+    --resource "{\"Catalog\":{\"Id\":\"${ACCOUNT_ID}:s3tablescatalog/${BUCKET_NAME}\"}}" \
+    --permissions DESCRIBE \
+    --region "${AWS_REGION}" 2>&1 | tail -2 || warn "Catalog DESCRIBE grant may already exist"
+aws lakeformation grant-permissions \
+    --principal "DataLakePrincipalIdentifier=${SPECTRUM_ROLE_ARN}" \
+    --resource "{\"Database\":{\"CatalogId\":\"${ACCOUNT_ID}:s3tablescatalog/${BUCKET_NAME}\",\"Name\":\"${NAMESPACE}\"}}" \
+    --permissions DESCRIBE \
+    --region "${AWS_REGION}" 2>&1 | tail -2 || warn "Database DESCRIBE grant may already exist"
+aws lakeformation grant-permissions \
+    --principal "DataLakePrincipalIdentifier=${SPECTRUM_ROLE_ARN}" \
+    --resource "{\"Table\":{\"CatalogId\":\"${ACCOUNT_ID}:s3tablescatalog/${BUCKET_NAME}\",\"DatabaseName\":\"${NAMESPACE}\",\"TableWildcard\":{}}}" \
+    --permissions SELECT DESCRIBE \
+    --region "${AWS_REGION}" 2>&1 | tail -2 || warn "Table SELECT grant may already exist"
+ok "Lake Formation permissions granted"
+
+# 3c. Create the Redshift external schema.
 SECRET_NAME=$(stack_output_from "${STACK_NAME}" RedshiftAdminSecretName)
 [ -n "${SECRET_NAME}" ] || err "RedshiftAdminSecretName export missing on ${STACK_NAME}"
 SECRET_ARN=$(aws secretsmanager describe-secret \
@@ -117,24 +207,18 @@ SECRET_ARN=$(aws secretsmanager describe-secret \
     --query 'ARN' --output text)
 [ -n "${SECRET_ARN}" ] || err "Could not resolve admin secret ARN"
 
-ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
 CATALOG_ID="${ACCOUNT_ID}:s3tablescatalog/${BUCKET_NAME}"
-
-# Redshift needs an IAM role to read the federated catalog. We pass
-# the workgroup's default IAM role here; if that's not configured,
-# the user has to associate one. For now we use the admin's identity
-# via secret-arn for DDL and rely on the workgroup default for queries.
 log "Creating Redshift external schema 'cold' against ${CATALOG_ID}..."
 EXT_SCHEMA_SQL=$(cat <<EOF
 DROP SCHEMA IF EXISTS cold CASCADE;
 CREATE EXTERNAL SCHEMA cold
 FROM DATA CATALOG
-DATABASE 'cdc'
-IAM_ROLE default
+DATABASE '${NAMESPACE}'
+IAM_ROLE '${SPECTRUM_ROLE_ARN}'
 CATALOG_ID '${CATALOG_ID}';
 EOF
 )
-redshift_data_run_or_ignore "${EXT_SCHEMA_SQL}" "${SECRET_ARN}" "already exists|relation .* does not exist|default role"
+redshift_data_run_or_ignore "${EXT_SCHEMA_SQL}" "${SECRET_ARN}" "already exists"
 
 ok "Iceberg cold path ready. Once Firehose flushes (60s buffer), run:"
 echo "    SELECT COUNT(*) FROM cold.cdc_events_archive;"

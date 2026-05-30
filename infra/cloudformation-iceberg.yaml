@@ -53,9 +53,22 @@ Parameters:
       around the cooldown when iterating.
     AllowedPattern: "^[a-z0-9-]{0,16}$"
 
+  EnableFirehose:
+    Type: String
+    Default: "false"
+    Description: >
+      Provision the Firehose delivery stream. Firehose validates the
+      destination Iceberg table exists at create time, but the table
+      itself can't be created until the namespace has propagated
+      (minutes). Two-phase deploy: pass "false" first (creates bucket
+      + namespace + IAM), the deploy script creates the table, then
+      pass "true" to add Firehose.
+    AllowedValues: ["true", "false"]
+
 Conditions:
   UseEnhancedFanOut: !Equals [!Ref EnhancedFanOut, "true"]
   HasBucketSuffix: !Not [!Equals [!Ref BucketSuffix, ""]]
+  WantFirehose: !Equals [!Ref EnableFirehose, "true"]
 
 Resources:
   # =========================================================================
@@ -64,6 +77,9 @@ Resources:
   # account, already present here as the s3tablescatalog catalog) so
   # Firehose can write through the Glue Iceberg API.
   # =========================================================================
+  # !Ref TableBucket returns the full ARN (not the name) so anywhere
+  # we need the bare bucket name we use !Select [1, !Split ["/", arn]]
+  # against the GetAtt ARN.
   TableBucket:
     Type: AWS::S3Tables::TableBucket
     Properties:
@@ -106,6 +122,7 @@ Resources:
   # =========================================================================
   FirehoseRole:
     Type: AWS::IAM::Role
+    Condition: WantFirehose
     Properties:
       RoleName: !Sub "${ProjectName}-iceberg-firehose-role"
       AssumeRolePolicyDocument:
@@ -207,6 +224,7 @@ Resources:
   # both.
   FirehoseErrorBucket:
     Type: AWS::S3::Bucket
+    Condition: WantFirehose
     Properties:
       BucketName: !Sub "${ProjectName}-iceberg-fh-errors-${AWS::AccountId}"
       LifecycleConfiguration:
@@ -220,8 +238,85 @@ Resources:
         IgnorePublicAcls: true
         RestrictPublicBuckets: true
 
+  # =========================================================================
+  # Redshift Spectrum IAM role
+  # Attached to the base-stack workgroup (out-of-band by 07-deploy-iceberg.sh
+  # because the workgroup lives in a different stack and we don't want a
+  # circular import). Read access to:
+  #   - Glue Data Catalog (the federated s3tablescatalog)
+  #   - S3 Tables data
+  #   - Lake Formation (which guards the federated catalog)
+  # =========================================================================
+  RedshiftSpectrumRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "${ProjectName}-iceberg-redshift-role"
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - redshift.amazonaws.com
+                - redshift-serverless.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: GlueRead
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - glue:GetCatalog
+                  - glue:GetCatalogs
+                  - glue:GetDatabase
+                  - glue:GetDatabases
+                  - glue:GetTable
+                  - glue:GetTables
+                  - glue:GetPartition
+                  - glue:GetPartitions
+                Resource:
+                  - !Sub "arn:aws:glue:${AWS::Region}:${AWS::AccountId}:catalog"
+                  - !Sub "arn:aws:glue:${AWS::Region}:${AWS::AccountId}:catalog/s3tablescatalog"
+                  - !Sub "arn:aws:glue:${AWS::Region}:${AWS::AccountId}:catalog/s3tablescatalog/*"
+                  - !Sub "arn:aws:glue:${AWS::Region}:${AWS::AccountId}:database/s3tablescatalog/*"
+                  - !Sub "arn:aws:glue:${AWS::Region}:${AWS::AccountId}:database/*/s3tablescatalog/*"
+                  - !Sub "arn:aws:glue:${AWS::Region}:${AWS::AccountId}:table/s3tablescatalog/*/*"
+                  - !Sub "arn:aws:glue:${AWS::Region}:${AWS::AccountId}:table/*/s3tablescatalog/*/*"
+        - PolicyName: S3TablesRead
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - s3tables:GetTableBucket
+                  - s3tables:GetNamespace
+                  - s3tables:GetTable
+                  - s3tables:GetTableMetadataLocation
+                  - s3tables:GetTableData
+                  - s3tables:ListTables
+                  - s3tables:ListNamespaces
+                  - s3tables:ListTableBuckets
+                Resource:
+                  - !GetAtt TableBucket.TableBucketARN
+                  - !Sub "${TableBucket.TableBucketARN}/*"
+        - PolicyName: LakeFormation
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - lakeformation:GetDataAccess
+                  - lakeformation:GetResourceLFTags
+                  - lakeformation:ListLFTags
+                  - lakeformation:GetLFTag
+                  - lakeformation:SearchTablesByLFTags
+                  - lakeformation:SearchDatabasesByLFTags
+                Resource: "*"
+
   FirehoseLogGroup:
     Type: AWS::Logs::LogGroup
+    Condition: WantFirehose
     Properties:
       LogGroupName: !Sub "/aws/firehose/${ProjectName}-iceberg"
       RetentionInDays: 14
@@ -233,7 +328,7 @@ Resources:
   # =========================================================================
   EfoConsumer:
     Type: AWS::Kinesis::StreamConsumer
-    Condition: UseEnhancedFanOut
+    Condition: UseEnhancedFanOut  # implicitly requires WantFirehose
     Properties:
       ConsumerName: !Sub "${ProjectName}-iceberg-firehose"
       StreamARN:
@@ -244,6 +339,7 @@ Resources:
   # =========================================================================
   FirehoseStream:
     Type: AWS::KinesisFirehose::DeliveryStream
+    Condition: WantFirehose
     Properties:
       DeliveryStreamName: !Sub "${ProjectName}-iceberg"
       DeliveryStreamType: KinesisStreamAsSource
@@ -259,7 +355,9 @@ Resources:
         # the bucket-level child (not the parent), and inside that the
         # database name is just the namespace ("cdc").
         CatalogConfiguration:
-          CatalogArn: !Sub "arn:aws:glue:${AWS::Region}:${AWS::AccountId}:catalog/s3tablescatalog/${TableBucket}"
+          CatalogArn: !Sub
+            - "arn:aws:glue:${AWS::Region}:${AWS::AccountId}:catalog/s3tablescatalog/${BucketName}"
+            - BucketName: !Select [1, !Split ["/", !GetAtt TableBucket.TableBucketARN]]
         # The DSQL CDC events arrive UNORDERED with both INSERT and
         # UPDATE encoded as op="c". We don't dedupe here — we keep
         # the same append-only model as cdc_events. AppendOnly=true
@@ -300,8 +398,8 @@ Outputs:
       Name: !Sub "${ProjectName}-iceberg-bucket-arn"
 
   TableBucketName:
-    Description: S3 Tables bucket name
-    Value: !Ref TableBucket
+    Description: S3 Tables bucket name (extracted from ARN — !Ref returns the ARN)
+    Value: !Select [1, !Split ["/", !GetAtt TableBucket.TableBucketARN]]
     Export:
       Name: !Sub "${ProjectName}-iceberg-bucket-name"
 
@@ -324,23 +422,35 @@ Outputs:
     Description: >
       Bucket-nested Glue catalog ID Redshift uses in
       CREATE EXTERNAL SCHEMA (account-id:s3tablescatalog/<bucket-name>).
-    Value: !Sub "${AWS::AccountId}:s3tablescatalog/${TableBucket}"
+    Value: !Sub
+      - "${AWS::AccountId}:s3tablescatalog/${BucketName}"
+      - BucketName: !Select [1, !Split ["/", !GetAtt TableBucket.TableBucketARN]]
     Export:
       Name: !Sub "${ProjectName}-iceberg-catalog-id"
 
   GlueCatalogArn:
     Description: Bucket-nested Glue catalog ARN (used by Firehose internally)
-    Value: !Sub "arn:aws:glue:${AWS::Region}:${AWS::AccountId}:catalog/s3tablescatalog/${TableBucket}"
+    Value: !Sub
+      - "arn:aws:glue:${AWS::Region}:${AWS::AccountId}:catalog/s3tablescatalog/${BucketName}"
+      - BucketName: !Select [1, !Split ["/", !GetAtt TableBucket.TableBucketARN]]
     Export:
       Name: !Sub "${ProjectName}-iceberg-catalog-arn"
 
+  RedshiftSpectrumRoleArn:
+    Description: IAM role to attach to the Redshift Serverless workgroup
+    Value: !GetAtt RedshiftSpectrumRole.Arn
+    Export:
+      Name: !Sub "${ProjectName}-iceberg-redshift-role-arn"
+
   FirehoseStreamArn:
+    Condition: WantFirehose
     Description: Firehose delivery stream ARN
     Value: !GetAtt FirehoseStream.Arn
     Export:
       Name: !Sub "${ProjectName}-iceberg-firehose-arn"
 
   FirehoseLogGroup:
+    Condition: WantFirehose
     Description: CloudWatch log group for delivery diagnostics
     Value: !Ref FirehoseLogGroup
     Export:
