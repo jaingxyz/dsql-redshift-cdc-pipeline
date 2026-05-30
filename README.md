@@ -168,24 +168,22 @@ auth paths into the workgroup:
 `ExistingRoleName=...` to attach the policy to a SageMaker role you
 already have instead of creating a new one.
 
-**One-time grant for federated creds.** When SageMaker connects via
-"Temporary credentials" mode, Redshift logs it in as a fresh federated
-user (`IAMR:dsql-cdc-sagemaker-exec-role`) with no privileges. Grant it
-once, as admin:
+**Grants for the federated path.** `schema/redshift_schema.sql` grants
+SELECT on `cdc_events` and the four `*_current` views to `PUBLIC`, so
+any auto-created federated DB user (Studio's project identity, the
+SageMaker exec role, BI tools) can read them. If you'd rather scope
+grants to the SageMaker role specifically (and drop the PUBLIC grant
+in `schema/redshift_schema.sql` for a tighter prod posture), the
+`infra/scripts/06-deploy-sagemaker.sh` script handles it for you:
 
-```sql
-CREATE USER "IAMR:dsql-cdc-sagemaker-exec-role" WITH PASSWORD DISABLE;
-GRANT SELECT ON ALL TABLES IN SCHEMA public
-    TO "IAMR:dsql-cdc-sagemaker-exec-role";
-ALTER DEFAULT PRIVILEGES IN SCHEMA public
-    GRANT SELECT ON TABLES TO "IAMR:dsql-cdc-sagemaker-exec-role";
+```bash
+infra/scripts/06-deploy-sagemaker.sh
 ```
 
-The `ALTER DEFAULT PRIVILEGES` line keeps future tables/views grant-ed
-automatically — without it you'd have to re-run the GRANT every time
-the schema script re-creates the views. Run as admin via the Redshift
-Query Editor v2 console, or via the Data API with `--secret-arn`
-pointing at `redshift!dsql-cdc-ns-admin`.
+It deploys the CFN stack, then runs `CREATE USER` +
+`GRANT SELECT ON ALL TABLES IN SCHEMA public` +
+`ALTER DEFAULT PRIVILEGES` against the workgroup using the admin
+secret. Idempotent: re-running tolerates "user already exists".
 
 **Connecting from a notebook.** Pick whichever auth fits. All three
 snippets assume the notebook's default boto3 session is running as the
@@ -236,14 +234,50 @@ while client.describe_statement(Id=qid)["Status"] not in ("FINISHED", "FAILED", 
 print(client.get_statement_result(Id=qid)["Records"])
 ```
 
-**Why I don't see views in Studio's schema browser.** The left-sidebar
-"Data" tab in Studio shows the **AWS Glue Data Catalog** — not Redshift.
-Redshift views won't appear there. Use the Redshift connection wizard
-(Data → Add connection → Redshift Serverless → pick auth method) or
-just run SQL directly from a notebook cell as shown above. To make
-views *catalog-visible* (useful for cross-engine queries via Athena),
-register the workgroup with Glue via Redshift Datashares — that's
-beyond the scope of this sample.
+### SageMaker Unified Studio: connecting and seeing the views
+
+If you're using **SageMaker Unified Studio** (the 2024+ DataZone-backed
+console at `*.sagemaker.<region>.on.aws`), the Data tab does show
+Redshift connections — but only objects the **connecting DB user**
+has SELECT on. The setup that works:
+
+1. **Project → Data → Connections → Add → Amazon Redshift**.
+2. **Redshift compute** = JDBC URL of your workgroup, e.g.
+   `jdbc:redshift://dsql-cdc-wg.<account>.<region>.redshift-serverless.amazonaws.com:5439/dev`.
+3. **JDBC URL Parameters**: `groupFederation=True` (Studio default —
+   enables IAM federation against Redshift Serverless).
+4. **Authentication type = IAM**, leave **Access role ARN empty** to
+   use the project's own IAM identity, OR paste
+   `arn:aws:iam::<account>:role/dsql-cdc-sagemaker-exec-role` to use
+   the role provisioned by `cloudformation-sagemaker.yaml`.
+5. **Save**, refresh the Catalogs tree (the ↻ icon), expand
+   `Connections → <conn-name> → dev → public`.
+
+You should see **`tables(1)`** (cdc_events) and **`views(4)`**
+(orders/customers/products/order_items_current). If you see
+`views(0)`, it's a **GRANTs gap**: the connecting DB user has SELECT
+on `cdc_events` (granted to PUBLIC by `schema/redshift_schema.sql`)
+but not on the views. The schema file now grants the views to PUBLIC
+too — re-run `infra/scripts/03-load-schemas.sh` if you bootstrapped
+before that change, or run as admin:
+
+```sql
+GRANT SELECT ON
+    orders_current, customers_current,
+    products_current, order_items_current
+TO PUBLIC;
+```
+
+Once the views are visible, click any of them in the catalog tree to
+see columns + sample data, or open a SQL cell from the project's
+Query Editor and run anything from `analytics/sample_queries.sql`.
+
+**Reference docs:**
+- [SageMaker Unified Studio overview](https://docs.aws.amazon.com/sagemaker-unified-studio/latest/userguide/what-is-sagemaker-unified-studio.html)
+- [Add an Amazon Redshift connection](https://docs.aws.amazon.com/sagemaker-unified-studio/latest/userguide/connections.html)
+- [Redshift JDBC option `groupFederation`](https://docs.aws.amazon.com/redshift/latest/mgmt/jdbc20-configuration-options.html)
+- [`redshift-serverless:GetCredentials` API](https://docs.aws.amazon.com/redshift-serverless/latest/APIReference/API_GetCredentials.html)
+- [Redshift admin password in Secrets Manager (`ManageAdminPassword`)](https://docs.aws.amazon.com/redshift/latest/mgmt/redshift-secrets-manager-integration.html)
 
 Tear down when done:
 

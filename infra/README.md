@@ -125,6 +125,15 @@ notebook can authenticate to the workgroup:
 
 …plus the `redshift-data:*` actions either path needs.
 
+Deploy via the wrapper script (recommended — also runs the GRANTs the
+federated path needs, idempotently):
+
+```bash
+infra/scripts/06-deploy-sagemaker.sh
+```
+
+Or with raw CFN:
+
 ```bash
 aws cloudformation deploy \
     --stack-name dsql-cdc-sagemaker \
@@ -144,10 +153,11 @@ Parameters:
 **Output**: `ExecutionRoleArn` — paste this into the SageMaker domain
 or notebook's "Execution role" field.
 
-**One-time GRANT for the federated path.** When SageMaker connects
-with "Temporary credentials", Redshift logs in as a brand-new user
-`IAMR:dsql-cdc-sagemaker-exec-role` with no privileges. Run once, as
-admin (Query Editor v2 console, or Data API with `--secret-arn`):
+**Grants.** `schema/redshift_schema.sql` already grants `SELECT` on
+`cdc_events` and the four `*_current` views to `PUBLIC`, so any
+auto-created federated DB user can read them. If you want grants
+scoped to the SageMaker role specifically, `06-deploy-sagemaker.sh`
+also runs:
 
 ```sql
 CREATE USER "IAMR:dsql-cdc-sagemaker-exec-role" WITH PASSWORD DISABLE;
@@ -157,27 +167,39 @@ ALTER DEFAULT PRIVILEGES IN SCHEMA public
     GRANT SELECT ON TABLES TO "IAMR:dsql-cdc-sagemaker-exec-role";
 ```
 
-Skip this if you'll always connect via Secrets Manager (which uses the
-admin user). The `ALTER DEFAULT PRIVILEGES` line means future tables
-auto-inherit the grant — without it you'd need to re-run on every
-schema reload.
+`ALTER DEFAULT PRIVILEGES` keeps future tables/views grant-ed without
+re-running. Use `SKIP_GRANTS=1` to deploy the stack only and skip this
+step.
 
-**Why don't I see views in the Studio "Data" sidebar?** That sidebar
-shows the **AWS Glue Data Catalog**, not Redshift. Use the Redshift
-connection wizard (Data → Add connection → Redshift Serverless) or
-just SQL directly from a notebook cell:
+#### Connecting from SageMaker Unified Studio
 
-```python
-import boto3
-boto3.client("redshift-data").execute_statement(
-    WorkgroupName="dsql-cdc-wg", Database="dev",
-    Sql="SELECT * FROM orders_current LIMIT 10",
-)
-```
+Studio's left-sidebar **Data → Catalogs** tree shows objects from the
+**connecting DB user's** perspective. Setup:
 
-To make views *catalog-visible* (useful for Athena), register the
-workgroup with Glue via Redshift Datashares — beyond the scope of
-this sample.
+1. **Project → Data → Connections → Add → Amazon Redshift**
+2. **Redshift compute**:
+   `jdbc:redshift://dsql-cdc-wg.<account>.<region>.redshift-serverless.amazonaws.com:5439/dev`
+3. **JDBC URL Parameters**: `groupFederation=True` (Studio default —
+   enables IAM federation against Redshift Serverless).
+4. **Authentication type = IAM**, **Access role ARN** =
+   `arn:aws:iam::<account>:role/dsql-cdc-sagemaker-exec-role` (or
+   leave empty to use the project's own identity, which also works
+   thanks to the PUBLIC grants).
+5. Refresh the catalog tree — `dev → public` should show
+   **`tables(1)`** + **`views(4)`**.
+
+If you see `views(0)`, the connecting DB user has SELECT on
+`cdc_events` (from the PUBLIC grant) but not on the views. Re-run
+`infra/scripts/03-load-schemas.sh` to apply the PUBLIC grant added by
+this commit, or run `GRANT SELECT ON <view> TO PUBLIC` as admin.
+
+Reference docs:
+
+- [SageMaker Unified Studio overview](https://docs.aws.amazon.com/sagemaker-unified-studio/latest/userguide/what-is-sagemaker-unified-studio.html)
+- [Add an Amazon Redshift connection](https://docs.aws.amazon.com/sagemaker-unified-studio/latest/userguide/connections.html)
+- [Redshift JDBC option `groupFederation`](https://docs.aws.amazon.com/redshift/latest/mgmt/jdbc20-configuration-options.html)
+- [`redshift-serverless:GetCredentials` API](https://docs.aws.amazon.com/redshift-serverless/latest/APIReference/API_GetCredentials.html)
+- [Redshift admin password in Secrets Manager (`ManageAdminPassword`)](https://docs.aws.amazon.com/redshift/latest/mgmt/redshift-secrets-manager-integration.html)
 
 Tear down: `aws cloudformation delete-stack --stack-name dsql-cdc-sagemaker`
 
