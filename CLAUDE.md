@@ -65,9 +65,46 @@ There is no test runner. Adding one would mean either:
 
 The pragmatic call: rely on `cfn-lint` + `ruff check` + `shellcheck` to catch the things that can be caught statically. End-to-end correctness comes from running `bootstrap.sh` and watching the simulator drive events through to Redshift.
 
+## Working with AWS via coding-agent tooling
+
+When making AWS calls or generating IaC for this repo, prefer the
+[Agent Toolkit for AWS](https://github.com/aws/agent-toolkit-for-aws)
+and the AWS Labs MCP servers over guessing or using `aws` CLI calls
+that bypass observability:
+
+- **`aws-core` plugin** — service selection, CDK/CloudFormation,
+  serverless, observability, billing, deployment skills. Loaded via
+  `claude plugin install aws-core@claude-plugins-official`.
+- **`aws-data-analytics` plugin** — S3 Tables, Glue, Athena, ETL.
+  Useful when extending the pipeline beyond Redshift Serverless.
+- **Aurora DSQL MCP server** (`aurora-dsql-mcp`) — connected to the
+  cluster from `infra/.env.bootstrap`. Has a `dsql_lint` tool that
+  catches DSQL-incompatible SQL before you run it; the schema in
+  `schema/dsql_schema.sql` was validated with it.
+- **Redshift MCP server** (`awslabs.redshift-mcp-server`) — runs
+  queries against the workgroup. Use this instead of hand-rolling
+  `aws redshift-data execute-statement` for ad-hoc analytics.
+- **AWS MCP server** (bundled with the plugins above) — full AWS API
+  coverage + sandboxed Python. Prefer over raw `aws` CLI for any
+  multi-step operation that benefits from audit logging.
+
+General guidance (from `aws/agent-toolkit-for-aws/rules/`):
+
+- Before starting an AWS task, check whether a relevant skill exists
+  in the loaded plugins and prefer its guidance over training data.
+- When uncertain about API parameters, permissions, or limits, verify
+  against AWS docs (the AWS MCP server's documentation tools, the
+  references below, or the AWS Labs MCP server READMEs) instead of
+  guessing. State uncertainty explicitly.
+- For new infrastructure, prefer CloudFormation (this repo's existing
+  pattern) or CDK over standalone CLI commands.
+- Do not use em dashes in AWS resource names — hyphens only.
+
 ## References
 
 - Aurora DSQL: https://docs.aws.amazon.com/aurora-dsql/latest/userguide/
 - Aurora DSQL CDC (preview): https://docs.aws.amazon.com/aurora-dsql/latest/userguide/cdc.html
 - Redshift Data API: https://docs.aws.amazon.com/redshift/latest/mgmt/data-api.html
-- Companion blog post (link added once published)
+- Agent Toolkit for AWS: https://github.com/aws/agent-toolkit-for-aws
+- AWS Labs MCP servers: https://github.com/awslabs/mcp
+- Companion blog post: https://gauravjx.substack.com/p/zero-etl-dsql-to-redshift-almost (also on [AWS Builder Center](https://builder.aws.com/content/39S4beDMSbn6piEwUXKUxyNpjkM/zero-etl-dsql-to-redshift-almost))

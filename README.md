@@ -377,22 +377,34 @@ The script here detects "No updates to perform" and skips the wait.
 ## Building this with AI coding assistants
 
 AWS publishes purpose-built tooling that makes this kind of work dramatically
-faster:
+faster. The recommended starting point is the
+**[Agent Toolkit for AWS](https://github.com/aws/agent-toolkit-for-aws)**
+(GA, May 2026) — a unified set of plugins that bundle the AWS MCP Server,
+agent skills, and project-level rules. For Claude Code:
 
-- **`databases-on-aws` plugin** in [`awslabs/agent-plugins`](https://github.com/awslabs/agent-plugins)
-  contains a `dsql` agent skill that activates on phrases like "Aurora DSQL"
-  or "DSQL schema" and steers schema design toward DSQL-friendly patterns.
-- **Aurora DSQL MCP server** in [`awslabs/mcp`](https://github.com/awslabs/mcp/tree/main/src/aurora-dsql-mcp-server)
-  has a `dsql_lint` tool that catches DSQL-incompatible SQL before you run it.
-  The schema in this sample was validated with it.
-- **Redshift MCP server** in [`awslabs/mcp`](https://github.com/awslabs/mcp/tree/main/src/redshift-mcp-server)
-  lets the assistant run queries against your warehouse during development.
+```bash
+# Foundational AWS skills (CDK/CFN, serverless, observability, …)
+claude plugin install aws-core@claude-plugins-official
 
-For production workloads, AWS recently launched the
-[Agent Toolkit for AWS](https://aws.amazon.com/about-aws/whats-new/2026/05/agent-toolkit/)
-as the successor — it adds IAM condition keys to distinguish agent actions
-from human actions and full CloudTrail visibility. The standalone repos
-remain great for experimentation.
+# S3 Tables / Glue / Athena / ETL skills
+claude plugin install aws-data-analytics@claude-plugins-official
+```
+
+Pair them with the AWS Labs **MCP servers** in
+[`awslabs/mcp`](https://github.com/awslabs/mcp) for the database-specific
+work this repo touches:
+
+- **Aurora DSQL MCP server** ([`src/aurora-dsql-mcp-server`](https://github.com/awslabs/mcp/tree/main/src/aurora-dsql-mcp-server))
+  has a `dsql_lint` tool that catches DSQL-incompatible SQL before you
+  run it. The DSQL schema here was validated with it. Install:
+  `claude mcp add --scope user aurora-dsql-mcp -e FASTMCP_LOG_LEVEL=ERROR -- uvx awslabs.aurora-dsql-mcp-server@latest --cluster_endpoint <endpoint> --region us-east-1 --database_user admin --profile default`
+- **Redshift MCP server** ([`src/redshift-mcp-server`](https://github.com/awslabs/mcp/tree/main/src/redshift-mcp-server))
+  lets the assistant run queries against your warehouse during
+  development. Install: `claude mcp add --scope user awslabs.redshift-mcp-server -- uvx awslabs.redshift-mcp-server@latest`
+
+The repo's own [`CLAUDE.md`](CLAUDE.md) tells future agents which of
+these to reach for, plus the project-specific invariants (parameterized
+SQL, async statement polling, append-only writes, etc.).
 
 ## License
 
