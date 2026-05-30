@@ -19,6 +19,14 @@ FROM --platform=linux/arm64 python:3.11-slim
 
 WORKDIR /app
 
+# python:3.11-slim ships /etc/ssl but with a stub trust store. The DSQL
+# endpoint is signed under Amazon Trust Services CAs, which only land in
+# /etc/ssl/certs once ca-certificates is installed. Without this, libpq
+# (with sslmode=verify-full + sslrootcert=system) fails cert verification.
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+
 # Copy requirements first so dependency installs cache between code edits.
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
