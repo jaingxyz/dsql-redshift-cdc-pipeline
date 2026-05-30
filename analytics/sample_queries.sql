@@ -50,7 +50,7 @@ ORDER BY orders DESC;
 -- =============================================================================
 
 -- High-value orders from new customers in the last hour.
--- Cross-checks order_currrent against the customer creation timestamp.
+-- Cross-checks orders_current against the customer creation timestamp.
 WITH new_customers AS (
     SELECT customer_id, last_change_at AS signed_up_at
     FROM customers_current

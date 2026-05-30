@@ -49,9 +49,12 @@ AI-assisted authorship disclosure
 ================================================================================
 
 This sample, including code, schemas, documentation, and the accompanying
-blog post, was authored with the assistance of an AI coding agent
-(Anthropic Claude via the Kiro CLI). All output was reviewed, tested, and
-edited by a human author before publication. Errors are the author's.
+blog post — "Zero-ETL DSQL → Redshift, Almost"
+(https://gauravjx.substack.com/p/zero-etl-dsql-to-redshift-almost,
+https://builder.aws.com/content/39S4beDMSbn6piEwUXKUxyNpjkM/zero-etl-dsql-to-redshift-almost)
+— was authored with the assistance of an AI coding agent (Anthropic
+Claude via the Kiro CLI). All output was reviewed, tested, and edited
+by a human author before publication. Errors are the author's.
 
 ================================================================================
 Trademarks

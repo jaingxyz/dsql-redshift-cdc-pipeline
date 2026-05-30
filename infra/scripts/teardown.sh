@@ -1,8 +1,13 @@
 #!/usr/bin/env bash
 # Tear down everything created by bootstrap.sh, in reverse order.
 #
-# Order: DSQL CDC stream -> CloudFormation stack (which removes the DSQL
-# cluster, Kinesis, Redshift, Lambda, and IAM roles) -> local env file.
+# Order: optional add-on stacks (SageMaker, simulator) -> DSQL CDC stream
+# -> base CloudFormation stack (which removes the DSQL cluster, Kinesis,
+# Redshift, Lambda, and IAM roles) -> local env file.
+#
+# Add-on stacks are deleted BEFORE the base stack because the simulator
+# stack imports values via Fn::ImportValue from the base — CloudFormation
+# refuses to delete an export that's still in use by another stack.
 #
 # Safety: this script DELETES resources. It prompts before each destructive
 # action unless YES=1 is set in the environment (for CI / scripted use).
@@ -24,6 +29,34 @@ confirm() {
     read -r -p "$1 [y/N] " resp
     [[ "${resp}" =~ ^[Yy]$ ]]
 }
+
+# Helper: delete a CFN stack if it exists, prompt first, wait for completion.
+delete_stack_if_exists() {
+    local stack="$1"
+    local label="$2"
+    if ! aws cloudformation describe-stacks \
+            --stack-name "${stack}" --region "${AWS_REGION}" \
+            >/dev/null 2>&1; then
+        return 0
+    fi
+    if confirm "Delete ${label} stack ${stack}?"; then
+        aws cloudformation delete-stack \
+            --stack-name "${stack}" --region "${AWS_REGION}"
+        log "Waiting for ${stack} deletion..."
+        aws cloudformation wait stack-delete-complete \
+            --stack-name "${stack}" --region "${AWS_REGION}" \
+            || warn "${stack} delete wait failed (check console)"
+        ok "${label} stack deleted"
+    else
+        warn "Keeping ${label} stack. Base-stack delete will fail if it"
+        warn "still imports values from this stack."
+    fi
+}
+
+# 0. Optional add-on stacks first — they import from the base stack
+# and have to go before its exports can be removed.
+delete_stack_if_exists "${PROJECT_NAME}-sagemaker" "SageMaker access"
+delete_stack_if_exists "${PROJECT_NAME}-simulator" "always-on simulator"
 
 # 1. Delete the DSQL CDC stream
 if [ -n "${DSQL_STREAM_ID:-}" ] && [ -n "${DSQL_CLUSTER_ID:-}" ]; then

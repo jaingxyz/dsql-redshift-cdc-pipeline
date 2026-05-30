@@ -11,9 +11,9 @@ events from **Amazon Aurora DSQL** through **Amazon Kinesis Data Streams** and
 a realistic e-commerce sample app to drive it, and analytical queries that
 showcase the use cases.
 
-> 📖 **Companion blog post:** *From Cart to Insight in Seconds: Building a Fully
-> Serverless E-Commerce Analytics Pipeline with Aurora DSQL, Kinesis, and Redshift*
-> — link will be added here once published on Substack.
+> 📖 **Companion blog post:** *Zero-ETL DSQL → Redshift, Almost.*
+> Read it on [Substack](https://gauravjx.substack.com/p/zero-etl-dsql-to-redshift-almost)
+> or [AWS Builder Center](https://builder.aws.com/content/39S4beDMSbn6piEwUXKUxyNpjkM/zero-etl-dsql-to-redshift-almost).
 
 ---
 
