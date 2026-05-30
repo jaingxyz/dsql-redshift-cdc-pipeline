@@ -27,6 +27,11 @@ RUN apt-get update \
     && apt-get install -y --no-install-recommends ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 
+# libpq honors PGSSLROOTCERT for verify-full. The libpq bundled in the
+# psycopg[binary] wheel doesn't auto-discover Debian's CA bundle, so we
+# point it explicitly. Net effect: sslmode=verify-full Just Works.
+ENV PGSSLROOTCERT=/etc/ssl/certs/ca-certificates.crt
+
 # Copy requirements first so dependency installs cache between code edits.
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt

@@ -101,9 +101,11 @@ def dsql_connection():
     Yield a psycopg connection to the DSQL cluster.
 
     sslmode=verify-full validates the server cert against a trust store.
-    sslrootcert=system points libpq at the OS bundle (Amazon Root CA is
-    in /etc/ssl/certs in python:3.11-slim). Without it, libpq looks for
-    ~/.postgresql/root.crt and fails. `require` would skip verification.
+    The trust store path is read from PGSSLROOTCERT (libpq env), set in
+    the container's Dockerfile to /etc/ssl/certs/ca-certificates.crt.
+    For local runs, export PGSSLROOTCERT to your platform's CA bundle
+    or set it to "system" with libpq >= 16. `require` would skip
+    verification (insecure).
     """
     conn = psycopg.connect(
         host=f"{CLUSTER_ID}.dsql.{REGION}.on.aws",
@@ -112,7 +114,6 @@ def dsql_connection():
         user="admin",
         password=_generate_password(),
         sslmode="verify-full",
-        sslrootcert="system",
         autocommit=True,
     )
     try:
