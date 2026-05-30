@@ -15,6 +15,8 @@ Bootstrap, manage, and tear down the AWS resources for the CDC pipeline.
 | Kinesis → Lambda event source mapping | CloudFormation | Batch size 100, 5-second batching window. |
 | **DSQL CDC stream → Kinesis** | AWS CLI (`scripts/02`) | DSQL CDC is in public preview and not yet covered by CloudFormation. |
 | Source + target schemas | psql + Redshift Data API (`scripts/03`) | DSQL: `customers`, `products`, `orders`, `order_items`. Redshift: `cdc_events` log + per-table current-state views. |
+| **Optional**: always-on order simulator | CloudFormation (`cloudformation-simulator.yaml`) | ECR + minimal VPC + Fargate + AWS Budget + GitHub OIDC role. Deployed via `scripts/05`. |
+| **Optional**: SageMaker access | CloudFormation (`cloudformation-sagemaker.yaml`) | IAM role + managed policy granting Secrets Manager read, `GetCredentials` on the workgroup, and `redshift-data:*`. |
 
 ## Prerequisites
 
@@ -90,6 +92,94 @@ aws redshift-data execute-statement \
 ```
 
 You should see counts climb across `customers`, `products`, `orders`, and `order_items` in real time.
+
+## Optional add-on stacks
+
+These are deployed independently from the base stack — they're additive
+and can be torn down without touching the core pipeline.
+
+### Always-on order simulator (`cloudformation-simulator.yaml`)
+
+Runs `order_simulator.py` continuously on Fargate so the pipeline stays
+warm. Provisions an ECR repo, minimal VPC (public subnets, no NAT), an
+ECS service, an AWS Budget, and a GitHub OIDC role for image builds.
+
+```bash
+infra/scripts/05-deploy-simulator.sh
+```
+
+The container image is built and pushed by the GitHub Actions workflow
+in `.github/workflows/build-simulator.yml` — the script just provisions
+the infrastructure shell. Cost: ~$80–200/mo dominated by Redshift
+Serverless.
+
+Tear down: `aws cloudformation delete-stack --stack-name dsql-cdc-simulator`
+
+### SageMaker access (`cloudformation-sagemaker.yaml`)
+
+Creates (or augments) an IAM role with the two ways a SageMaker
+notebook can authenticate to the workgroup:
+
+1. **Secrets Manager** — read the auto-rotated admin password
+2. **`redshift-serverless:GetCredentials`** — short-lived federated creds
+
+…plus the `redshift-data:*` actions either path needs.
+
+```bash
+aws cloudformation deploy \
+    --stack-name dsql-cdc-sagemaker \
+    --template-file infra/cloudformation-sagemaker.yaml \
+    --parameter-overrides ProjectName=dsql-cdc \
+    --capabilities CAPABILITY_NAMED_IAM \
+    --region us-east-1
+```
+
+Parameters:
+
+| Parameter | Default | What it does |
+|---|---|---|
+| `ProjectName` | `dsql-cdc` | Must match the base stack — used for Fn::ImportValue lookups. |
+| `ExistingRoleName` | `""` | Empty = create a new exec role with `AmazonSageMakerFullAccess`. Set to a role NAME (not ARN) to attach the Redshift policy onto an existing role. |
+
+**Output**: `ExecutionRoleArn` — paste this into the SageMaker domain
+or notebook's "Execution role" field.
+
+**One-time GRANT for the federated path.** When SageMaker connects
+with "Temporary credentials", Redshift logs in as a brand-new user
+`IAMR:dsql-cdc-sagemaker-exec-role` with no privileges. Run once, as
+admin (Query Editor v2 console, or Data API with `--secret-arn`):
+
+```sql
+CREATE USER "IAMR:dsql-cdc-sagemaker-exec-role" WITH PASSWORD DISABLE;
+GRANT SELECT ON ALL TABLES IN SCHEMA public
+    TO "IAMR:dsql-cdc-sagemaker-exec-role";
+ALTER DEFAULT PRIVILEGES IN SCHEMA public
+    GRANT SELECT ON TABLES TO "IAMR:dsql-cdc-sagemaker-exec-role";
+```
+
+Skip this if you'll always connect via Secrets Manager (which uses the
+admin user). The `ALTER DEFAULT PRIVILEGES` line means future tables
+auto-inherit the grant — without it you'd need to re-run on every
+schema reload.
+
+**Why don't I see views in the Studio "Data" sidebar?** That sidebar
+shows the **AWS Glue Data Catalog**, not Redshift. Use the Redshift
+connection wizard (Data → Add connection → Redshift Serverless) or
+just SQL directly from a notebook cell:
+
+```python
+import boto3
+boto3.client("redshift-data").execute_statement(
+    WorkgroupName="dsql-cdc-wg", Database="dev",
+    Sql="SELECT * FROM orders_current LIMIT 10",
+)
+```
+
+To make views *catalog-visible* (useful for Athena), register the
+workgroup with Glue via Redshift Datashares — beyond the scope of
+this sample.
+
+Tear down: `aws cloudformation delete-stack --stack-name dsql-cdc-sagemaker`
 
 ## Tearing it down
 

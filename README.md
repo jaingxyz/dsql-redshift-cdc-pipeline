@@ -50,14 +50,17 @@ near-zero, active cost scales linearly with traffic.
 
 ```
 .
-├── infra/                       # Infrastructure as code
-│   ├── cloudformation.yaml      # DSQL cluster, Kinesis, IAM, Redshift, Lambda, event source
+├── infra/                          # Infrastructure as code
+│   ├── cloudformation.yaml         # DSQL cluster, Kinesis, IAM, Redshift, Lambda, event source
+│   ├── cloudformation-simulator.yaml   # Optional: always-on Fargate order simulator
+│   ├── cloudformation-sagemaker.yaml   # Optional: SageMaker exec role + Redshift access
 │   ├── scripts/
 │   │   ├── bootstrap.sh         # One-shot orchestrator
 │   │   ├── 01-deploy-cfn.sh
 │   │   ├── 02-create-cdc-stream.sh
 │   │   ├── 03-load-schemas.sh
 │   │   ├── 04-deploy-lambda-code.sh
+│   │   ├── 05-deploy-simulator.sh
 │   │   ├── teardown.sh
 │   │   └── _lib.sh              # Shared helpers
 │   └── README.md                # Detailed infrastructure docs
@@ -136,6 +139,116 @@ Or pause without tearing down:
 ```bash
 aws ecs update-service --cluster dsql-cdc-sim-cluster \
     --service dsql-cdc-sim-service --desired-count 0
+```
+
+## Querying from SageMaker Studio (optional)
+
+If you want to explore the warehouse from SageMaker Studio notebooks,
+deploy the optional SageMaker access stack defined in
+[`infra/cloudformation-sagemaker.yaml`](infra/cloudformation-sagemaker.yaml):
+
+```bash
+aws cloudformation deploy \
+    --stack-name dsql-cdc-sagemaker \
+    --template-file infra/cloudformation-sagemaker.yaml \
+    --parameter-overrides ProjectName=dsql-cdc \
+    --capabilities CAPABILITY_NAMED_IAM \
+    --region us-east-1
+```
+
+This creates an IAM role (`dsql-cdc-sagemaker-exec-role`) with both
+auth paths into the workgroup:
+
+- **Secrets Manager** — read the auto-rotated admin password (the base
+  stack creates this via `ManageAdminPassword=true`)
+- **Short-lived federated creds** — `redshift-serverless:GetCredentials`
+  on the workgroup ARN
+
+…plus the `redshift-data:*` actions either path needs. Pass
+`ExistingRoleName=...` to attach the policy to a SageMaker role you
+already have instead of creating a new one.
+
+**One-time grant for federated creds.** When SageMaker connects via
+"Temporary credentials" mode, Redshift logs it in as a fresh federated
+user (`IAMR:dsql-cdc-sagemaker-exec-role`) with no privileges. Grant it
+once, as admin:
+
+```sql
+CREATE USER "IAMR:dsql-cdc-sagemaker-exec-role" WITH PASSWORD DISABLE;
+GRANT SELECT ON ALL TABLES IN SCHEMA public
+    TO "IAMR:dsql-cdc-sagemaker-exec-role";
+ALTER DEFAULT PRIVILEGES IN SCHEMA public
+    GRANT SELECT ON TABLES TO "IAMR:dsql-cdc-sagemaker-exec-role";
+```
+
+The `ALTER DEFAULT PRIVILEGES` line keeps future tables/views grant-ed
+automatically — without it you'd have to re-run the GRANT every time
+the schema script re-creates the views. Run as admin via the Redshift
+Query Editor v2 console, or via the Data API with `--secret-arn`
+pointing at `redshift!dsql-cdc-ns-admin`.
+
+**Connecting from a notebook.** Pick whichever auth fits. All three
+snippets assume the notebook's default boto3 session is running as the
+SageMaker exec role — verify with
+`boto3.client("sts").get_caller_identity()` before you wonder why
+permissions look wrong.
+
+```python
+# Option A: Secrets Manager (no GRANT needed; uses the admin user)
+# pip install redshift_connector
+import boto3, json, redshift_connector
+sec = boto3.client("secretsmanager").get_secret_value(
+    SecretId="redshift!dsql-cdc-ns-admin"
+)
+creds = json.loads(sec["SecretString"])
+# The admin secret stores the namespace host, not the workgroup
+# endpoint. Look up the workgroup endpoint explicitly.
+wg = boto3.client("redshift-serverless").get_workgroup(
+    workgroupName="dsql-cdc-wg"
+)["workgroup"]["endpoint"]
+conn = redshift_connector.connect(
+    host=wg["address"], port=wg["port"], database="dev",
+    user=creds["username"], password=creds["password"],
+)
+
+# Option B: Federated creds (uses the SageMaker role; requires GRANT above)
+import boto3
+rs = boto3.client("redshift-serverless")
+out = rs.get_credentials(workgroupName="dsql-cdc-wg", dbName="dev")
+# out["dbUser"] == "IAMR:dsql-cdc-sagemaker-exec-role" — only if the
+# caller IS that role. Run boto3.client("sts").get_caller_identity()
+# to confirm. If it returns a different ARN, the GRANT above doesn't
+# apply to that user and queries will hit permission-denied.
+# Pass out["dbUser"] / out["dbPassword"] to your driver of choice.
+
+# Option C: Redshift Data API (no driver, no creds — uses the role implicitly)
+import boto3, time
+client = boto3.client("redshift-data")
+resp = client.execute_statement(
+    WorkgroupName="dsql-cdc-wg", Database="dev",
+    Sql="SELECT COUNT(*) FROM cdc_events",
+)
+# execute_statement is asynchronous — it returns a statement ID, not
+# rows. Poll describe_statement until FINISHED, then fetch the result.
+qid = resp["Id"]
+while client.describe_statement(Id=qid)["Status"] not in ("FINISHED", "FAILED", "ABORTED"):
+    time.sleep(0.5)
+print(client.get_statement_result(Id=qid)["Records"])
+```
+
+**Why I don't see views in Studio's schema browser.** The left-sidebar
+"Data" tab in Studio shows the **AWS Glue Data Catalog** — not Redshift.
+Redshift views won't appear there. Use the Redshift connection wizard
+(Data → Add connection → Redshift Serverless → pick auth method) or
+just run SQL directly from a notebook cell as shown above. To make
+views *catalog-visible* (useful for cross-engine queries via Athena),
+register the workgroup with Glue via Redshift Datashares — that's
+beyond the scope of this sample.
+
+Tear down when done:
+
+```bash
+aws cloudformation delete-stack --stack-name dsql-cdc-sagemaker
 ```
 
 ## Sample analytical queries
