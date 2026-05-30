@@ -117,3 +117,16 @@ FROM (
 )
 WHERE rn = 1
   AND operation <> 'd';
+
+-- Grant SELECT on the current-state views to PUBLIC, mirroring the
+-- cdc_events grant above. This makes the views queryable by any
+-- federated DB user a tool (Lambda, SageMaker Studio's project IAM
+-- identity, BI tools) is auto-created as on first connection.
+-- Tighten in production by granting to a specific role and dropping
+-- the PUBLIC grant.
+GRANT SELECT ON
+    orders_current,
+    customers_current,
+    products_current,
+    order_items_current
+TO PUBLIC;
