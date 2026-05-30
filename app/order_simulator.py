@@ -100,9 +100,10 @@ def dsql_connection():
     """
     Yield a psycopg connection to the DSQL cluster.
 
-    sslmode=verify-full validates the server cert against the system trust
-    store (Amazon Root CA, present in python:3.11-slim via ca-certificates).
-    Required by DSQL; `require` would TLS-encrypt but skip cert verification.
+    sslmode=verify-full validates the server cert against a trust store.
+    sslrootcert=system points libpq at the OS bundle (Amazon Root CA is
+    in /etc/ssl/certs in python:3.11-slim). Without it, libpq looks for
+    ~/.postgresql/root.crt and fails. `require` would skip verification.
     """
     conn = psycopg.connect(
         host=f"{CLUSTER_ID}.dsql.{REGION}.on.aws",
@@ -111,6 +112,7 @@ def dsql_connection():
         user="admin",
         password=_generate_password(),
         sslmode="verify-full",
+        sslrootcert="system",
         autocommit=True,
     )
     try:
