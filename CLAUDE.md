@@ -77,10 +77,18 @@ that bypass observability:
   `claude plugin install aws-core@claude-plugins-official`.
 - **`aws-data-analytics` plugin** — S3 Tables, Glue, Athena, ETL.
   Useful when extending the pipeline beyond Redshift Serverless.
-- **Aurora DSQL MCP server** (`aurora-dsql-mcp`) — connected to the
-  cluster from `infra/.env.bootstrap`. Has a `dsql_lint` tool that
-  catches DSQL-incompatible SQL before you run it; the schema in
-  `schema/dsql_schema.sql` was validated with it.
+- **`databases-on-aws` plugin** — installs the `dsql` skill plus an
+  `aurora-dsql` MCP server bundled with the plugin. The plugin ships
+  the MCP server in documentation-only mode by default; we patch its
+  `.mcp.json` cache entry to add `--cluster_endpoint`, `--region`,
+  and `--database_user` for live DB ops against the cluster from
+  `infra/.env.bootstrap`. Has a `dsql_lint` tool that catches
+  DSQL-incompatible SQL before you run it; the schema in
+  `schema/dsql_schema.sql` was validated with it. Caveat: the patch
+  has to be re-applied after `claude plugin update databases-on-aws`,
+  which overwrites the cached `.mcp.json`. Loaded via
+  `claude plugin install databases-on-aws@agent-plugins-for-aws`
+  (marketplace = `awslabs/agent-plugins`).
 - **Redshift MCP server** (`awslabs.redshift-mcp-server`) — runs
   queries against the workgroup. Use this instead of hand-rolling
   `aws redshift-data execute-statement` for ad-hoc analytics.

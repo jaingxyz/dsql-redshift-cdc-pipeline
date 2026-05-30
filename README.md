@@ -390,17 +390,32 @@ claude plugin install aws-core@claude-plugins-official
 claude plugin install aws-data-analytics@claude-plugins-official
 ```
 
-Pair them with the AWS Labs **MCP servers** in
-[`awslabs/mcp`](https://github.com/awslabs/mcp) for the database-specific
-work this repo touches:
+For DSQL specifically, install the **`databases-on-aws` plugin** from
+[`awslabs/agent-plugins`](https://github.com/awslabs/agent-plugins).
+It ships the `dsql` skill (DSQL-aware schema design, query plan help,
+multi-tenant patterns, `dsql_lint`) bundled with the Aurora DSQL MCP
+server. The schema here was validated with the lint tool.
 
-- **Aurora DSQL MCP server** ([`src/aurora-dsql-mcp-server`](https://github.com/awslabs/mcp/tree/main/src/aurora-dsql-mcp-server))
-  has a `dsql_lint` tool that catches DSQL-incompatible SQL before you
-  run it. The DSQL schema here was validated with it. Install:
-  `claude mcp add --scope user aurora-dsql-mcp -e FASTMCP_LOG_LEVEL=ERROR -- uvx awslabs.aurora-dsql-mcp-server@latest --cluster_endpoint <endpoint> --region us-east-1 --database_user admin --profile default`
-- **Redshift MCP server** ([`src/redshift-mcp-server`](https://github.com/awslabs/mcp/tree/main/src/redshift-mcp-server))
-  lets the assistant run queries against your warehouse during
-  development. Install: `claude mcp add --scope user awslabs.redshift-mcp-server -- uvx awslabs.redshift-mcp-server@latest`
+```bash
+claude plugin marketplace add awslabs/agent-plugins
+claude plugin install databases-on-aws@agent-plugins-for-aws
+```
+
+The plugin's bundled MCP ships in documentation-only mode by default;
+to enable live DB ops, edit
+`~/.claude/plugins/cache/agent-plugins-for-aws/databases-on-aws/<version>/.mcp.json`
+and add `--cluster_endpoint`, `--region`, `--database_user` to the
+`aurora-dsql` server's args. The patch is overwritten on plugin
+update — re-apply after `claude plugin update databases-on-aws`.
+
+For Redshift work, the AWS Labs **MCP server** in
+[`awslabs/mcp`](https://github.com/awslabs/mcp) has no plugin wrapper
+yet; install it directly:
+
+```bash
+claude mcp add --scope user awslabs.redshift-mcp-server -- \
+    uvx awslabs.redshift-mcp-server@latest
+```
 
 The repo's own [`CLAUDE.md`](CLAUDE.md) tells future agents which of
 these to reach for, plus the project-specific invariants (parameterized
