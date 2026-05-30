@@ -1,0 +1,112 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >
+  SageMaker access to the CDC pipeline's Redshift workgroup. Provisions
+  an execution role (or reuses an existing one) and grants it the two
+  capabilities a SageMaker notebook needs to query Redshift Serverless:
+    1. Read the auto-rotated admin password from Secrets Manager
+    2. Mint short-lived federated creds via redshift-serverless:GetCredentials
+  Plus the Redshift Data API actions for both pathways.
+
+  Imports from the base stack ({ProjectName}-stack):
+    redshift-admin-secret-name, redshift-workgroup-arn
+
+Parameters:
+  ProjectName:
+    Type: String
+    Default: dsql-cdc
+    Description: Must match the base stack's ProjectName.
+    AllowedPattern: "^[a-z][a-z0-9-]{2,30}$"
+
+  ExistingRoleName:
+    Type: String
+    Default: ""
+    Description: >
+      If set, attach the Redshift access policy to this existing IAM
+      role (e.g. an execution role from a SageMaker domain you already
+      have). Leave empty to provision a fresh role.
+
+Conditions:
+  CreateNewRole: !Equals [!Ref ExistingRoleName, ""]
+
+Resources:
+  # New execution role, only created when ExistingRoleName is empty.
+  # AmazonSageMakerFullAccess covers the standard notebook/training/
+  # endpoint paths; tighten later if you only need a subset.
+  SageMakerExecutionRole:
+    Type: AWS::IAM::Role
+    Condition: CreateNewRole
+    Properties:
+      RoleName: !Sub "${ProjectName}-sagemaker-exec-role"
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: sagemaker.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AmazonSageMakerFullAccess
+      Tags:
+        - Key: Project
+          Value: !Ref ProjectName
+
+  # The Redshift-specific permissions. Attached to either the new role
+  # or the caller-supplied existing role. Kept as a separate managed
+  # policy so it can be detached cleanly if SageMaker access is revoked.
+  RedshiftAccessPolicy:
+    Type: AWS::IAM::ManagedPolicy
+    Properties:
+      ManagedPolicyName: !Sub "${ProjectName}-sagemaker-redshift-access"
+      Description: !Sub "Lets ${ProjectName} SageMaker notebooks query the Redshift workgroup via Secrets Manager or short-lived federated creds."
+      Roles:
+        - !If
+          - CreateNewRole
+          - !Ref SageMakerExecutionRole
+          - !Ref ExistingRoleName
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          # Path 1: Secrets Manager. The base stack created an
+          # auto-rotated admin secret via ManageAdminPassword=true.
+          # Secrets Manager appends a 6-char random suffix to every
+          # secret name, so we use the prefix + wildcard.
+          - Sid: ReadAdminSecret
+            Effect: Allow
+            Action: secretsmanager:GetSecretValue
+            Resource: !Sub
+              - "arn:${AWS::Partition}:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:${SecretName}-*"
+              - SecretName:
+                  Fn::ImportValue: !Sub "${ProjectName}-redshift-admin-secret-name"
+
+          # Path 2: short-lived federated creds. The DB user becomes
+          # IAMR:<role-name> and needs SELECT granted to it once on
+          # the *_current views (same one-time grant used for IAM:AWSCLI).
+          - Sid: GetFederatedCreds
+            Effect: Allow
+            Action: redshift-serverless:GetCredentials
+            Resource:
+              Fn::ImportValue: !Sub "${ProjectName}-redshift-workgroup-arn"
+
+          # Data API actions. redshift-data has no resource-level
+          # support — Resource:* is the only valid value (same
+          # constraint the base stack's Lambda hits).
+          - Sid: RedshiftDataApi
+            Effect: Allow
+            Action:
+              - redshift-data:ExecuteStatement
+              - redshift-data:BatchExecuteStatement
+              - redshift-data:DescribeStatement
+              - redshift-data:GetStatementResult
+              - redshift-data:CancelStatement
+              - redshift-data:ListStatements
+            Resource: "*"
+
+Outputs:
+  ExecutionRoleArn:
+    Description: ARN to assign as the SageMaker domain or notebook execution role
+    Value: !If
+      - CreateNewRole
+      - !GetAtt SageMakerExecutionRole.Arn
+      - !Sub "arn:aws:iam::${AWS::AccountId}:role/${ExistingRoleName}"
+    Export:
+      Name: !Sub "${ProjectName}-sagemaker-exec-role-arn"

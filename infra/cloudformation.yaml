@@ -270,6 +270,27 @@ Outputs:
     Export:
       Name: !Sub "${ProjectName}-redshift-workgroup"
 
+  RedshiftWorkgroupArn:
+    Description: Workgroup ARN (used by IAM policies that grant redshift-serverless:GetCredentials)
+    Value: !GetAtt RedshiftWorkgroup.Workgroup.WorkgroupArn
+    Export:
+      Name: !Sub "${ProjectName}-redshift-workgroup-arn"
+
+  RedshiftAdminSecretName:
+    # CFN doesn't surface AdminPasswordSecretArn as a GetAtt on the
+    # Namespace, so we export the deterministic name instead. Consumers
+    # can build the ARN with arn:aws:secretsmanager:<region>:<acct>:secret:<name>-*
+    # or look it up via aws secretsmanager describe-secret.
+    #
+    # The "redshift!<namespace>-admin" convention is set by
+    # ManageAdminPassword=true. We reference RedshiftNamespace via !Ref
+    # (returns NamespaceName) so renaming the namespace doesn't silently
+    # desync this export — the only assumption left is the convention.
+    Description: Name of the Secrets Manager secret holding the admin password
+    Value: !Sub "redshift!${RedshiftNamespace}-admin"
+    Export:
+      Name: !Sub "${ProjectName}-redshift-admin-secret-name"
+
   RedshiftDatabase:
     Description: Default database in the Redshift namespace
     Value: dev
