@@ -1,0 +1,347 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >
+  Part 2 cold-path: tees the existing Kinesis CDC stream into S3 Tables
+  (Iceberg) via Firehose, so Redshift can UNION hot (last 24h in
+  cdc_events) with cold (>24h in S3 Tables) via a federated Glue
+  catalog. Imports kinesis-stream-arn from the base stack.
+
+Parameters:
+  ProjectName:
+    Type: String
+    Default: dsql-cdc
+    Description: Must match the base stack's ProjectName.
+    AllowedPattern: "^[a-z][a-z0-9-]{2,30}$"
+
+  IcebergBufferSeconds:
+    Type: Number
+    Default: 60
+    Description: >
+      Firehose buffer interval before flushing to Iceberg. Range
+      60-900s. Smaller = lower cold-path latency, more snapshots
+      (more compaction work). 60s is the floor and the right call
+      for a demo.
+    MinValue: 60
+    MaxValue: 900
+
+  IcebergBufferMB:
+    Type: Number
+    Default: 64
+    Description: >
+      Buffer size before flushing. 1-128 MiB. Whichever of (size, time)
+      hits first wins. 64 MiB is conservative for a 1 TPS stream — most
+      flushes will be time-driven at this load.
+    MinValue: 1
+    MaxValue: 128
+
+  EnhancedFanOut:
+    Type: String
+    Default: "false"
+    Description: >
+      Enable Kinesis enhanced fan-out for the Firehose consumer. Costs
+      ~$36/mo + $0.013 per million events but isolates Firehose from
+      Lambda's read budget on the same stream. At 1 TPS we have plenty
+      of read budget without it; flip to "true" if you scale up.
+    AllowedValues: ["true", "false"]
+
+  BucketSuffix:
+    Type: String
+    Default: ""
+    Description: >
+      Optional suffix appended to the S3 Tables bucket name. S3 Tables
+      bucket names are globally reserved within an account/region for
+      ~minutes after deletion; pass a fresh suffix (e.g. "v2") to work
+      around the cooldown when iterating.
+    AllowedPattern: "^[a-z0-9-]{0,16}$"
+
+Conditions:
+  UseEnhancedFanOut: !Equals [!Ref EnhancedFanOut, "true"]
+  HasBucketSuffix: !Not [!Equals [!Ref BucketSuffix, ""]]
+
+Resources:
+  # =========================================================================
+  # S3 Tables: bucket + namespace + the actual Iceberg table.
+  # The S3 Tables ↔ Glue federation is account-level (set up once in the
+  # account, already present here as the s3tablescatalog catalog) so
+  # Firehose can write through the Glue Iceberg API.
+  # =========================================================================
+  TableBucket:
+    Type: AWS::S3Tables::TableBucket
+    Properties:
+      TableBucketName: !If
+        - HasBucketSuffix
+        - !Sub "${ProjectName}-iceberg-${BucketSuffix}"
+        - !Sub "${ProjectName}-iceberg"
+      # Compaction: S3 Tables auto-compacts files. We accept the defaults
+      # (target ~512 MiB files) — fine for the load profile here.
+      UnreferencedFileRemoval:
+        Status: Enabled
+        UnreferencedDays: 3
+        NoncurrentDays: 10
+
+  TableNamespace:
+    Type: AWS::S3Tables::Namespace
+    Properties:
+      TableBucketARN: !GetAtt TableBucket.TableBucketARN
+      Namespace: cdc
+
+  # The cold cdc_events Iceberg table is created by
+  # infra/scripts/07-deploy-iceberg.sh AFTER this stack reaches
+  # CREATE_COMPLETE. Why not in CFN? Both AWS::S3Tables::Table and a
+  # Lambda-backed custom resource hit the same race: the namespace
+  # API has minutes-long propagation lag and create-table calls
+  # against a freshly-created namespace return 404 NotFound for far
+  # longer than CFN's resource handler will wait. The script-based
+  # approach gets idempotent retries with no Lambda cold-start
+  # constraints. Same pattern as the schema/Lambda-code load.
+
+  # =========================================================================
+  # Firehose IAM role
+  # Permissions:
+  #   - Kinesis: read the existing CDC stream
+  #   - Glue: read/write through the s3tablescatalog federated catalog
+  #     (this is the path to S3 Tables — Firehose talks to Glue, not
+  #     S3 Tables directly)
+  #   - S3 (limited): error/backup bucket the Firehose maintains
+  #   - Logs: deliver-stream log group
+  # =========================================================================
+  FirehoseRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "${ProjectName}-iceberg-firehose-role"
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: firehose.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: KinesisRead
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - kinesis:DescribeStream
+                  - kinesis:GetShardIterator
+                  - kinesis:GetRecords
+                  - kinesis:ListShards
+                Resource:
+                  Fn::ImportValue: !Sub "${ProjectName}-kinesis-stream-arn"
+        - PolicyName: GlueIceberg
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              # Glue Data API access through the federated S3 Tables
+              # catalog. Resource patterns scope to this account's
+              # s3tablescatalog and our namespace.
+              - Effect: Allow
+                Action:
+                  - glue:GetTable
+                  - glue:GetTables
+                  - glue:GetDatabase
+                  - glue:GetDatabases
+                  - glue:CreateTable
+                  - glue:UpdateTable
+                Resource:
+                  # The s3tablescatalog Glue catalog has 3 layers of
+                  # ARN: parent catalog, bucket-nested catalog, and
+                  # databases/tables under each. We allow all paths
+                  # the Firehose handler walks.
+                  - !Sub "arn:aws:glue:${AWS::Region}:${AWS::AccountId}:catalog"
+                  - !Sub "arn:aws:glue:${AWS::Region}:${AWS::AccountId}:catalog/s3tablescatalog"
+                  - !Sub "arn:aws:glue:${AWS::Region}:${AWS::AccountId}:catalog/s3tablescatalog/*"
+                  - !Sub "arn:aws:glue:${AWS::Region}:${AWS::AccountId}:database/s3tablescatalog/*"
+                  - !Sub "arn:aws:glue:${AWS::Region}:${AWS::AccountId}:database/*/s3tablescatalog/*"
+                  - !Sub "arn:aws:glue:${AWS::Region}:${AWS::AccountId}:table/s3tablescatalog/*/*"
+                  - !Sub "arn:aws:glue:${AWS::Region}:${AWS::AccountId}:table/*/s3tablescatalog/*/*"
+              # Lake Formation: required for Glue federated catalog
+              # operations against S3 Tables.
+              - Effect: Allow
+                Action:
+                  - lakeformation:GetDataAccess
+                Resource: "*"
+        - PolicyName: S3TablesIO
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              # Direct S3 Tables ops — Firehose performs the actual
+              # data writes through this path.
+              - Effect: Allow
+                Action:
+                  - s3tables:GetTableBucket
+                  - s3tables:GetNamespace
+                  - s3tables:GetTable
+                  - s3tables:GetTableMetadataLocation
+                  - s3tables:UpdateTableMetadataLocation
+                  - s3tables:PutTableData
+                  - s3tables:GetTableData
+                Resource:
+                  - !GetAtt TableBucket.TableBucketARN
+                  - !Sub "${TableBucket.TableBucketARN}/*"
+        - PolicyName: ErrorBucketIO
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - s3:PutObject
+                  - s3:GetBucketLocation
+                  - s3:ListBucket
+                Resource:
+                  - !GetAtt FirehoseErrorBucket.Arn
+                  - !Sub "${FirehoseErrorBucket.Arn}/*"
+        - PolicyName: Logs
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource: !GetAtt FirehoseLogGroup.Arn
+
+  # Where Firehose dumps records it can't write to Iceberg (parse
+  # errors, schema mismatches, transient backend failures past retries).
+  # Demo-grade: no versioning, short lifecycle. Production should add
+  # both.
+  FirehoseErrorBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub "${ProjectName}-iceberg-fh-errors-${AWS::AccountId}"
+      LifecycleConfiguration:
+        Rules:
+          - Id: expire-errors
+            Status: Enabled
+            ExpirationInDays: 7
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+
+  FirehoseLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub "/aws/firehose/${ProjectName}-iceberg"
+      RetentionInDays: 14
+
+  # =========================================================================
+  # Kinesis enhanced-fan-out consumer (optional; off by default).
+  # Provides Firehose its own 2 MB/s read pipe per shard, isolating it
+  # from the Lambda event-source mapping that consumes the same stream.
+  # =========================================================================
+  EfoConsumer:
+    Type: AWS::Kinesis::StreamConsumer
+    Condition: UseEnhancedFanOut
+    Properties:
+      ConsumerName: !Sub "${ProjectName}-iceberg-firehose"
+      StreamARN:
+        Fn::ImportValue: !Sub "${ProjectName}-kinesis-stream-arn"
+
+  # =========================================================================
+  # Firehose delivery stream
+  # =========================================================================
+  FirehoseStream:
+    Type: AWS::KinesisFirehose::DeliveryStream
+    Properties:
+      DeliveryStreamName: !Sub "${ProjectName}-iceberg"
+      DeliveryStreamType: KinesisStreamAsSource
+      KinesisStreamSourceConfiguration:
+        KinesisStreamARN:
+          Fn::ImportValue: !Sub "${ProjectName}-kinesis-stream-arn"
+        RoleARN: !GetAtt FirehoseRole.Arn
+      IcebergDestinationConfiguration:
+        RoleARN: !GetAtt FirehoseRole.Arn
+        # Catalog: the bucket-nested federated Glue catalog. The
+        # account-level s3tablescatalog catalog has one child catalog
+        # per S3 Tables bucket; Firehose's CatalogArn must point at
+        # the bucket-level child (not the parent), and inside that the
+        # database name is just the namespace ("cdc").
+        CatalogConfiguration:
+          CatalogArn: !Sub "arn:aws:glue:${AWS::Region}:${AWS::AccountId}:catalog/s3tablescatalog/${TableBucket}"
+        # The DSQL CDC events arrive UNORDERED with both INSERT and
+        # UPDATE encoded as op="c". We don't dedupe here — we keep
+        # the same append-only model as cdc_events. AppendOnly=true
+        # tells Firehose to skip Iceberg's MERGE/UPDATE codepath
+        # entirely (faster + cheaper).
+        AppendOnly: true
+        # Database name = S3 Tables namespace name; table name =
+        # S3 Tables table name. Both are validated against
+        # [a-zA-Z0-9._]+ so namespace and table names stay simple.
+        DestinationTableConfigurationList:
+          - DestinationDatabaseName: cdc
+            DestinationTableName: cdc_events_archive
+            S3ErrorOutputPrefix: !Sub "errors/${ProjectName}/cdc_events_archive/"
+        BufferingHints:
+          IntervalInSeconds: !Ref IcebergBufferSeconds
+          SizeInMBs: !Ref IcebergBufferMB
+        RetryOptions:
+          DurationInSeconds: 300
+        # Error path: anything Firehose can't deliver to Iceberg lands
+        # in S3 with the standard prefix layout. Demo only — production
+        # should alarm on this prefix's object count.
+        S3Configuration:
+          BucketARN: !GetAtt FirehoseErrorBucket.Arn
+          RoleARN: !GetAtt FirehoseRole.Arn
+          Prefix: !Sub "errors/${ProjectName}/"
+          ErrorOutputPrefix: !Sub "errors/${ProjectName}/!{firehose:error-output-type}/"
+        s3BackupMode: FailedDataOnly
+        CloudWatchLoggingOptions:
+          Enabled: true
+          LogGroupName: !Ref FirehoseLogGroup
+          LogStreamName: iceberg-delivery
+
+Outputs:
+  TableBucketArn:
+    Description: S3 Tables bucket ARN
+    Value: !GetAtt TableBucket.TableBucketARN
+    Export:
+      Name: !Sub "${ProjectName}-iceberg-bucket-arn"
+
+  TableBucketName:
+    Description: S3 Tables bucket name
+    Value: !Ref TableBucket
+    Export:
+      Name: !Sub "${ProjectName}-iceberg-bucket-name"
+
+  IcebergTableName:
+    Description: Iceberg table name (cdc_events_archive in namespace cdc)
+    Value: cdc_events_archive
+    Export:
+      Name: !Sub "${ProjectName}-iceberg-table-name"
+
+  IcebergGlueDatabase:
+    Description: >
+      Glue database name as seen through the bucket-nested
+      s3tablescatalog/<bucket> catalog. Equals the S3 Tables namespace.
+      Use this in Redshift's CREATE EXTERNAL SCHEMA DATABASE clause.
+    Value: cdc
+    Export:
+      Name: !Sub "${ProjectName}-iceberg-glue-database"
+
+  GlueCatalogId:
+    Description: >
+      Bucket-nested Glue catalog ID Redshift uses in
+      CREATE EXTERNAL SCHEMA (account-id:s3tablescatalog/<bucket-name>).
+    Value: !Sub "${AWS::AccountId}:s3tablescatalog/${TableBucket}"
+    Export:
+      Name: !Sub "${ProjectName}-iceberg-catalog-id"
+
+  GlueCatalogArn:
+    Description: Bucket-nested Glue catalog ARN (used by Firehose internally)
+    Value: !Sub "arn:aws:glue:${AWS::Region}:${AWS::AccountId}:catalog/s3tablescatalog/${TableBucket}"
+    Export:
+      Name: !Sub "${ProjectName}-iceberg-catalog-arn"
+
+  FirehoseStreamArn:
+    Description: Firehose delivery stream ARN
+    Value: !GetAtt FirehoseStream.Arn
+    Export:
+      Name: !Sub "${ProjectName}-iceberg-firehose-arn"
+
+  FirehoseLogGroup:
+    Description: CloudWatch log group for delivery diagnostics
+    Value: !Ref FirehoseLogGroup
+    Export:
+      Name: !Sub "${ProjectName}-iceberg-firehose-log-group"
