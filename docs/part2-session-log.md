@@ -598,3 +598,123 @@ What's NOT yet validated:
   identical to Success aside from the Choice routing.
 - SNS email subscription — `TIERING_ALERT_EMAIL` was empty for this
   deploy. Re-run with the email set or add a subscription via console.
+
+### Soak monitoring (paste-ready when you come back in N days)
+
+Schedule was flipped to `ENABLED` at 2026-06-08 23:23 PT, so the first
+auto-prune fires roughly 24h later (~23:23 UTC daily). gujain@amazon.com
+is subscribed to the SNS alert topic (pending click-to-confirm); failures
+or aborts will email there.
+
+**Signal 1 — every scheduled prune completed SUCCEEDED:**
+
+```bash
+export AWS_REGION=us-east-1
+SM_ARN=arn:aws:states:us-east-1:239355724610:stateMachine:dsql-cdc-tiering-prune
+
+# Last 20 executions, status + duration
+aws stepfunctions list-executions \
+    --state-machine-arn "${SM_ARN}" \
+    --max-results 20 \
+    --query 'executions[].{
+        Started:startDate,
+        Stopped:stopDate,
+        Status:status,
+        Name:name
+    }' \
+    --output table
+
+# Should be all SUCCEEDED. Any FAILED or ABORTED → drill in:
+aws stepfunctions list-executions \
+    --state-machine-arn "${SM_ARN}" \
+    --status-filter FAILED \
+    --query 'executions[].executionArn' \
+    --output text
+```
+
+**Signal 2 — latency drift (how long each prune took):**
+
+```bash
+# Subtract stopDate − startDate per execution; flag the trend.
+# A growing trend on VACUUM-heavy days is normal until traffic
+# stabilises.
+aws stepfunctions list-executions \
+    --state-machine-arn "${SM_ARN}" \
+    --max-results 20 \
+    --query 'executions[].{
+        Started:startDate,
+        DurationSec:to_string(stopDate)
+    }' \
+    --output table
+
+# More precise (Python one-liner):
+aws stepfunctions list-executions --state-machine-arn "${SM_ARN}" --max-results 20 \
+    --query 'executions[].[startDate,stopDate]' --output text \
+    | python3 -c "
+import sys
+from datetime import datetime
+for line in sys.stdin:
+    s, t = line.split()
+    ds = datetime.fromisoformat(s).timestamp()
+    dt = datetime.fromisoformat(t).timestamp()
+    print(f'{s}  {int(dt-ds):4d}s')
+"
+```
+
+**Signal 3 — no data loss (cold has rows for every window hot pruned):**
+
+```bash
+SECRET_ARN=$(aws secretsmanager describe-secret \
+    --secret-id "redshift!dsql-cdc-ns-admin" \
+    --query ARN --output text)
+
+# Hot's oldest row should always be ~24h ago (just inside the prune
+# horizon). Cold should have rows extending back to whenever Firehose
+# came online (2026-06-05 in this account).
+SID=$(aws redshift-data execute-statement \
+    --workgroup-name dsql-cdc-wg --database dev \
+    --secret-arn "${SECRET_ARN}" \
+    --sql "
+SELECT
+    'hot'  AS store,
+    COUNT(*)::BIGINT AS n,
+    MIN(commit_timestamp)::VARCHAR AS oldest,
+    MAX(commit_timestamp)::VARCHAR AS newest
+FROM cdc_events
+UNION ALL SELECT
+    'cold' AS store,
+    COUNT(*)::BIGINT AS n,
+    MIN(commit_timestamp)::VARCHAR AS oldest,
+    MAX(commit_timestamp)::VARCHAR AS newest
+FROM cold.cdc_events_archive
+ORDER BY 1
+" --query Id --output text)
+sleep 5
+aws redshift-data get-statement-result --id "${SID}" --output table
+```
+
+Expected after a clean N-day soak:
+
+| store | n              | oldest                  | newest         |
+|-------|----------------|-------------------------|----------------|
+| cold  | growing        | 2026-06-05 ...          | within ~1 min  |
+| hot   | small (~24h)   | NOW − 24h ± 1h          | within ~10 sec |
+
+**Signal 4 — SNS alarm count (did anything publish to email):**
+
+```bash
+# Number of failure/abort messages published in last 7 days.
+aws cloudwatch get-metric-statistics \
+    --namespace AWS/SNS \
+    --metric-name NumberOfMessagesPublished \
+    --dimensions Name=TopicName,Value=dsql-cdc-tiering-alerts \
+    --start-time "$(date -u -v-7d '+%Y-%m-%dT%H:%M:%S')" \
+    --end-time   "$(date -u '+%Y-%m-%dT%H:%M:%S')" \
+    --period 86400 --statistics Sum \
+    --query 'Datapoints[].[Timestamp,Sum]' --output table
+```
+
+If signal 4 returns 0 across all days, no failures or aborts were ever
+published to the topic. Combined with signal 1 = all SUCCEEDED, this is
+the cleanest "soak passed without hiccup" evidence you can get without
+attaching a CloudWatch alarm.
