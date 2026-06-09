@@ -86,10 +86,10 @@ def _reshape(payload: dict, ingested_us: int):
     if record_id is None or ts_ms is None:
         # No PK or no commit timestamp: same poison guard as the hot path.
         # Logging field presence (not values) keeps PK/timestamps out of
-        # CloudWatch — sample-grade hygiene. Bump to DEBUG and log values
+        # CloudWatch - sample-grade hygiene. Bump to DEBUG and log values
         # if you need them for one-off debugging.
         logger.warning(
-            "Dropping op=%s payload — id_present=%s ts_present=%s",
+            "Dropping op=%s payload - id_present=%s ts_present=%s",
             op,
             record_id is not None,
             ts_ms is not None,

@@ -12,7 +12,7 @@ TEMPLATE="${SCRIPT_DIR}/../cloudformation.yaml"
 [ -f "${TEMPLATE}" ] || err "Template not found at ${TEMPLATE}"
 
 log "Deploying stack ${STACK_NAME} from ${TEMPLATE}..."
-log "(This takes 3-5 minutes — DSQL cluster creation is the longest step.)"
+log "(This takes 3-5 minutes - DSQL cluster creation is the longest step.)"
 
 aws cloudformation deploy \
     --template-file "${TEMPLATE}" \

@@ -2,7 +2,7 @@
 # Deploy the Iceberg cold path. Three-phase deploy + post-stack wire-up:
 #
 #   Phase A: CFN deploy with EnableFirehose=true, EnableFirehoseStream=false
-#            — provisions bucket, namespace, IAM (Firehose role,
+#            - provisions bucket, namespace, IAM (Firehose role,
 #            transform Lambda + role + log group), and error bucket.
 #            Stream is held back so we can apply LF grants against the
 #            Firehose role principal that now exists.
@@ -17,7 +17,7 @@
 #            access at stream-create time.
 #   Step 4:  Update the transform Lambda's code (the CFN placeholder
 #            raises). Wait function-updated so Phase B sees real code.
-#   Phase B: CFN deploy with EnableFirehoseStream=true — creates the
+#   Phase B: CFN deploy with EnableFirehoseStream=true - creates the
 #            Firehose delivery stream wired to the now-ready Lambda.
 #   Step 5:  Attach the Spectrum role to the Redshift Serverless
 #            namespace and grant the namespace-default-role.
@@ -58,7 +58,7 @@ check_aws_creds
 # Phase A: everything EXCEPT the Firehose delivery stream
 # (EnableFirehose=true, EnableFirehoseStream=false). This creates the
 # bucket, namespace, IAM roles, the transform Lambda, and the error
-# bucket — but not the stream. The only hard ordering constraint in this
+# bucket - but not the stream. The only hard ordering constraint in this
 # pipeline is namespace -> table -> stream, and Phase A creates the
 # namespace, so a separate "bucket + namespace only" pre-phase is
 # redundant.
@@ -150,7 +150,7 @@ fi
 # Grant Lake Formation perms to the Firehose role BEFORE the stream
 # exists. The bucket-Glue catalog is in Lake Formation access control
 # mode, and Firehose validates glue:GetTable synchronously at stream
-# create time — so the role (created in Phase A) needs LF grants now,
+# create time - so the role (created in Phase A) needs LF grants now,
 # while the stream itself is still held back. LF grants are idempotent
 # and tolerate "already exists" on re-runs.
 # -----------------------------------------------------------------------------
@@ -163,7 +163,7 @@ log "Granting LF perms to Firehose role ${FIREHOSE_ROLE_ARN}..."
 # to hold glue:GetCatalog on the bucket-nested catalog). If the default
 # identity isn't an admin, set LF_ADMIN_PROFILE to a profile that is, or
 # add the default identity via `aws lakeformation put-data-lake-settings`.
-# lf_grant() aborts on AccessDenied rather than silently skipping —
+# lf_grant() aborts on AccessDenied rather than silently skipping -
 # a missing grant surfaces later as an opaque Firehose glue:GetTable
 # failure when the stream is created.
 LF=(aws)
@@ -256,7 +256,7 @@ else
     # Build the JSON list of roles: existing + new. Each role string
     # in the API is the bare ARN; we wrap in a JSON array. The env-var
     # prefix MUST be on the same line as `python3 - <<PY` (not on the
-    # later `aws ... update-namespace` line) — the heredoc captures
+    # later `aws ... update-namespace` line) - the heredoc captures
     # ROLES_JSON before update-namespace runs, so env vars set there
     # would be too late.
     ROLES_JSON=$(EXISTING="${EXISTING_ROLES}" NEW="${SPECTRUM_ROLE_ARN}" python3 - <<'PY'
@@ -386,7 +386,7 @@ redshift_data_run_or_ignore "${EXT_SCHEMA_SQL}" "${SECRET_ARN}" "already exists"
 # The Spectrum role also needs Glue perms on the default catalog so
 # Redshift can traverse the resource link to the bucket-nested
 # s3tablescatalog. Scoped to JUST the resource link database and its
-# tables — not catalog-wide — so a copy-paste deploy in a multi-tenant
+# tables - not catalog-wide - so a copy-paste deploy in a multi-tenant
 # account doesn't grant read on every database/table.
 log "Attaching DefaultCatalogTraversal policy to Spectrum role..."
 aws iam put-role-policy --role-name "$(basename "${SPECTRUM_ROLE_ARN}")" \

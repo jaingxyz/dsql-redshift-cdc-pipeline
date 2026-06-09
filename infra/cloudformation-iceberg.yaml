@@ -28,7 +28,7 @@ Parameters:
     Default: 64
     Description: >
       Buffer size before flushing. 1-128 MiB. Whichever of (size, time)
-      hits first wins. 64 MiB is conservative for a 1 TPS stream — most
+      hits first wins. 64 MiB is conservative for a 1 TPS stream - most
       flushes will be time-driven at this load.
     MinValue: 1
     MaxValue: 128
@@ -98,7 +98,7 @@ Resources:
         - !Sub "${ProjectName}-iceberg-${BucketSuffix}"
         - !Sub "${ProjectName}-iceberg"
       # Compaction: S3 Tables auto-compacts files. We accept the defaults
-      # (target ~512 MiB files) — fine for the load profile here.
+      # (target ~512 MiB files) - fine for the load profile here.
       UnreferencedFileRemoval:
         Status: Enabled
         UnreferencedDays: 3
@@ -125,12 +125,12 @@ Resources:
   # Permissions:
   #   - Kinesis: read the existing CDC stream
   #   - Glue: read/write through the s3tablescatalog federated catalog
-  #     (one of the two paths to S3 Tables — Firehose uses Glue's
+  #     (one of the two paths to S3 Tables - Firehose uses Glue's
   #     federated API for catalog ops, AND S3 Tables direct API for
   #     data writes)
   #   - Lake Formation: GetDataAccess (required for any Glue federated
   #     catalog op against an LF-managed catalog)
-  #   - S3 Tables: direct table I/O (the second path — Glue handles
+  #   - S3 Tables: direct table I/O (the second path - Glue handles
   #     metadata, S3 Tables handles parquet writes)
   #   - S3 (limited): error/backup bucket the Firehose maintains
   #   - Logs: deliver-stream log group
@@ -186,14 +186,14 @@ Resources:
                   # The s3tablescatalog Glue catalog has 3 layers of
                   # ARN forms for the federated s3tablescatalog,
                   # per https://docs.aws.amazon.com/glue/latest/dg/s3tables-catalog-prerequisites.html:
-                  #   catalog                            — root
-                  #   catalog/s3tablescatalog            — federated parent
-                  #   catalog/s3tablescatalog/<bkt>      — bucket-nested
+                  #   catalog                            - root
+                  #   catalog/s3tablescatalog            - federated parent
+                  #   catalog/s3tablescatalog/<bkt>      - bucket-nested
                   #   database/s3tablescatalog/<bkt>/<db>     ← TWO wildcards
                   #   table/s3tablescatalog/<bkt>/<db>/<tbl>  ← THREE wildcards
                   # An earlier draft used database/s3tablescatalog/* and
                   # table/s3tablescatalog/*/* (one wildcard short of the
-                  # documented form). Don't regress to those — the AWS
+                  # documented form). Don't regress to those - the AWS
                   # ARN authorizer only matches segment-by-segment, and
                   # the single-wildcard forms match nothing real.
                   - !Sub "arn:aws:glue:${AWS::Region}:${AWS::AccountId}:catalog"
@@ -211,7 +211,7 @@ Resources:
           PolicyDocument:
             Version: "2012-10-17"
             Statement:
-              # Direct S3 Tables ops — Firehose performs the actual
+              # Direct S3 Tables ops - Firehose performs the actual
               # data writes through this path.
               - Effect: Allow
                 Action:
@@ -377,8 +377,8 @@ Resources:
                   - glue:GetPartitions
                 Resource:
                   # Mirrors FirehoseRole's GlueIceberg patterns; Spectrum
-                  # walks the same s3tablescatalog parent → bucket-nested
-                  # → DB → table chain when querying the cold archive.
+                  # walks the same s3tablescatalog parent -> bucket-nested
+                  # -> DB -> table chain when querying the cold archive.
                   # ARN shapes per AWS Glue docs (see comment in the
                   # Firehose role above for the full spec).
                   - !Sub "arn:aws:glue:${AWS::Region}:${AWS::AccountId}:catalog"
@@ -462,7 +462,7 @@ Resources:
             - "arn:aws:glue:${AWS::Region}:${AWS::AccountId}:catalog/s3tablescatalog/${BucketName}"
             - BucketName: !Select [1, !Split ["/", !GetAtt TableBucket.TableBucketARN]]
         # The DSQL CDC events arrive UNORDERED with both INSERT and
-        # UPDATE encoded as op="c". We don't dedupe here — we keep
+        # UPDATE encoded as op="c". We don't dedupe here - we keep
         # the same append-only model as cdc_events. AppendOnly=true
         # tells Firehose to skip Iceberg's MERGE/UPDATE codepath
         # entirely (faster + cheaper).
@@ -496,7 +496,7 @@ Resources:
         RetryOptions:
           DurationInSeconds: 300
         # Error path: anything Firehose can't deliver to Iceberg lands
-        # in S3 with the standard prefix layout. Demo only — production
+        # in S3 with the standard prefix layout. Demo only - production
         # should alarm on this prefix's object count.
         S3Configuration:
           BucketARN: !GetAtt FirehoseErrorBucket.Arn
@@ -517,7 +517,7 @@ Outputs:
       Name: !Sub "${ProjectName}-iceberg-bucket-arn"
 
   TableBucketName:
-    Description: S3 Tables bucket name (extracted from ARN — !Ref returns the ARN)
+    Description: S3 Tables bucket name (extracted from ARN - !Ref returns the ARN)
     Value: !Select [1, !Split ["/", !GetAtt TableBucket.TableBucketARN]]
     Export:
       Name: !Sub "${ProjectName}-iceberg-bucket-name"

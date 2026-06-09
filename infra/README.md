@@ -8,12 +8,12 @@ Bootstrap, manage, and tear down the AWS resources for the CDC pipeline.
 |---|---|---|
 | Aurora DSQL cluster | CloudFormation (`AWS::DSQL::Cluster`) | Single-region. Deletion protection on by default. |
 | Kinesis Data Stream (on-demand) | CloudFormation | Receives CDC events from DSQL. |
-| IAM role for DSQL CDC → Kinesis | CloudFormation | Trust policy scoped to this cluster's ARN (least privilege). |
+| IAM role for DSQL CDC -> Kinesis | CloudFormation | Trust policy scoped to this cluster's ARN (least privilege). |
 | Redshift Serverless namespace + workgroup | CloudFormation | Target data warehouse. Admin password is AWS-managed in Secrets Manager. |
 | Lambda execution role | CloudFormation | Kinesis read + Redshift Data API + basic logs. |
 | Lambda function (CDC processor) | CloudFormation | Created with placeholder code. Real code deployed by `scripts/04`. |
-| Kinesis → Lambda event source mapping | CloudFormation | Batch size 100, 5-second batching window. |
-| **DSQL CDC stream → Kinesis** | AWS CLI (`scripts/02`) | DSQL CDC is in public preview and not yet covered by CloudFormation. |
+| Kinesis -> Lambda event source mapping | CloudFormation | Batch size 100, 5-second batching window. |
+| **DSQL CDC stream -> Kinesis** | AWS CLI (`scripts/02`) | DSQL CDC is in public preview and not yet covered by CloudFormation. |
 | Source + target schemas | psql + Redshift Data API (`scripts/03`) | DSQL: `customers`, `products`, `orders`, `order_items`. Redshift: `cdc_events` log + per-table current-state views. |
 | **Optional**: always-on order simulator | CloudFormation (`cloudformation-simulator.yaml`) | ECR + minimal VPC + Fargate + AWS Budget + GitHub OIDC role. Deployed via `scripts/05`. |
 | **Optional**: SageMaker access | CloudFormation (`cloudformation-sagemaker.yaml`) | IAM role + managed policy granting Secrets Manager read, `GetCredentials` on the workgroup, and `redshift-data:*`. |
@@ -63,7 +63,7 @@ Each script is self-contained and idempotent:
 ./04-deploy-lambda-code.sh     # ~10s
 ```
 
-State flows through `infra/.env.bootstrap` — source it to inspect or use the resources from your shell:
+State flows through `infra/.env.bootstrap` - source it to inspect or use the resources from your shell:
 
 ```bash
 source infra/.env.bootstrap
@@ -95,7 +95,7 @@ You should see counts climb across `customers`, `products`, `orders`, and `order
 
 ## Optional add-on stacks
 
-These are deployed independently from the base stack — they're additive
+These are deployed independently from the base stack - they're additive
 and can be torn down without touching the core pipeline.
 
 ### Always-on order simulator (`cloudformation-simulator.yaml`)
@@ -109,8 +109,8 @@ infra/scripts/05-deploy-simulator.sh
 ```
 
 The container image is built and pushed by the GitHub Actions workflow
-in `.github/workflows/build-simulator.yml` — the script just provisions
-the infrastructure shell. Cost: ~$80–200/mo dominated by Redshift
+in `.github/workflows/build-simulator.yml` - the script just provisions
+the infrastructure shell. Cost: ~$80-200/mo dominated by Redshift
 Serverless.
 
 Tear down: `aws cloudformation delete-stack --stack-name dsql-cdc-simulator`
@@ -120,12 +120,12 @@ Tear down: `aws cloudformation delete-stack --stack-name dsql-cdc-simulator`
 Creates (or augments) an IAM role with the two ways a SageMaker
 notebook can authenticate to the workgroup:
 
-1. **Secrets Manager** — read the auto-rotated admin password
-2. **`redshift-serverless:GetCredentials`** — short-lived federated creds
+1. **Secrets Manager** - read the auto-rotated admin password
+2. **`redshift-serverless:GetCredentials`** - short-lived federated creds
 
 …plus the `redshift-data:*` actions either path needs.
 
-Deploy via the wrapper script (recommended — also runs the GRANTs the
+Deploy via the wrapper script (recommended - also runs the GRANTs the
 federated path needs, idempotently):
 
 ```bash
@@ -147,10 +147,10 @@ Parameters:
 
 | Parameter | Default | What it does |
 |---|---|---|
-| `ProjectName` | `dsql-cdc` | Must match the base stack — used for Fn::ImportValue lookups. |
+| `ProjectName` | `dsql-cdc` | Must match the base stack - used for Fn::ImportValue lookups. |
 | `ExistingRoleName` | `""` | Empty = create a new exec role with `AmazonSageMakerFullAccess`. Set to a role NAME (not ARN) to attach the Redshift policy onto an existing role. |
 
-**Output**: `ExecutionRoleArn` — paste this into the SageMaker domain
+**Output**: `ExecutionRoleArn` - paste this into the SageMaker domain
 or notebook's "Execution role" field.
 
 **Grants.** `schema/redshift_schema.sql` already grants `SELECT` on
@@ -173,19 +173,19 @@ step.
 
 #### Connecting from SageMaker Unified Studio
 
-Studio's left-sidebar **Data → Catalogs** tree shows objects from the
+Studio's left-sidebar **Data -> Catalogs** tree shows objects from the
 **connecting DB user's** perspective. Setup:
 
-1. **Project → Data → Connections → Add → Amazon Redshift**
+1. **Project -> Data -> Connections -> Add -> Amazon Redshift**
 2. **Redshift compute**:
    `jdbc:redshift://dsql-cdc-wg.<account>.<region>.redshift-serverless.amazonaws.com:5439/dev`
-3. **JDBC URL Parameters**: `groupFederation=True` (Studio default —
+3. **JDBC URL Parameters**: `groupFederation=True` (Studio default -
    enables IAM federation against Redshift Serverless).
 4. **Authentication type = IAM**, **Access role ARN** =
    `arn:aws:iam::<account>:role/dsql-cdc-sagemaker-exec-role` (or
    leave empty to use the project's own identity, which also works
    thanks to the PUBLIC grants).
-5. Refresh the catalog tree — `dev → public` should show
+5. Refresh the catalog tree - `dev -> public` should show
    **`tables(1)`** + **`views(4)`**.
 
 If you see `views(0)`, the connecting DB user has SELECT on
@@ -212,7 +212,7 @@ unified view's hot/cold UNION just gets slower over time.
 
 **Prerequisite:** the Iceberg cold path (`07-deploy-iceberg.sh`) must
 already be running and Firehose must have flushed at least once. The
-safety check queries `cold.cdc_events_archive` directly — if Firehose
+safety check queries `cold.cdc_events_archive` directly - if Firehose
 has never flushed, every prune aborts with the "cold archive empty"
 SNS alert.
 
@@ -226,7 +226,7 @@ infra/scripts/08-deploy-tiering.sh
   the `DELETE`, then `VACUUM DELETE ONLY`, then `ANALYZE`. Each
   Redshift Data API call is async, so each step has a poll loop.
 - An EventBridge Scheduler entry that invokes the state machine on a
-  schedule. **Deploys `DISABLED` by default** — run a manual
+  schedule. **Deploys `DISABLED` by default** - run a manual
   `start-execution` first to verify the safety check works against
   live data, then enable.
 - An SNS topic for abort/failure alerts. Set `TIERING_ALERT_EMAIL=...`
@@ -251,8 +251,8 @@ aws stepfunctions start-execution --state-machine-arn "$SM_ARN"
 # Watch the execution graph in the Step Functions console.
 ```
 
-Expected paths: `SafetyCheck → SubmitDelete → Vacuum → Analyze → Success`
-when there's archived data, or `SafetyCheck → AbortNoArchive` (publishes
+Expected paths: `SafetyCheck -> SubmitDelete -> Vacuum -> Analyze -> Success`
+when there's archived data, or `SafetyCheck -> AbortNoArchive` (publishes
 SNS, ends successfully) when the cold side has zero rows for the window.
 
 Tear down: handled by `teardown.sh` (deletes the tiering stack before the
@@ -271,11 +271,11 @@ The script prompts before each destructive action. Pass `YES=1` to skip prompts 
 YES=1 ./teardown.sh
 ```
 
-Order: DSQL CDC stream → disable cluster deletion protection (with confirmation) → CloudFormation stack delete (which removes the DSQL cluster, Kinesis, Redshift, Lambda, and IAM roles) → local env file.
+Order: DSQL CDC stream -> disable cluster deletion protection (with confirmation) -> CloudFormation stack delete (which removes the DSQL cluster, Kinesis, Redshift, Lambda, and IAM roles) -> local env file.
 
 ## Why CFN + a couple of scripts (and not all CFN, all CDK, or all bash)?
 
-- **CloudFormation** for everything that has CFN coverage — Aurora DSQL clusters (`AWS::DSQL::Cluster`), Kinesis, IAM, Redshift Serverless, Lambda. Declarative, single-stack rollbacks, easy parameter overrides, free state management.
+- **CloudFormation** for everything that has CFN coverage - Aurora DSQL clusters (`AWS::DSQL::Cluster`), Kinesis, IAM, Redshift Serverless, Lambda. Declarative, single-stack rollbacks, easy parameter overrides, free state management.
 - **CLI script** only for the **DSQL CDC stream**, because DSQL CDC is in public preview and does not yet have a CloudFormation resource type. Once that's added (and CDK constructs follow), this script can be replaced with a CFN resource.
 - **Schema loading** is a CLI script because schemas evolve faster than infrastructure and schema migration tools (Flyway, Liquibase, etc.) typically own this layer in real projects.
 - **Lambda code deployment** is a CLI script because iterating on Lambda code shouldn't require redeploying the whole stack. CFN owns the function shell; the script owns the code.
@@ -286,6 +286,6 @@ If you'd prefer CDK, the `AWS::DSQL::Cluster` resource is also available as the 
 
 - **Idle cost**: near-zero. Kinesis on-demand has no idle charge. Redshift Serverless auto-pauses. Lambda is per-invocation. DSQL has minimum compute charges.
 - **Active cost during a 60-second simulator run**: typically under $0.50.
-- **Long-running development**: ~$5–20/month depending on Redshift query frequency.
+- **Long-running development**: ~$5-20/month depending on Redshift query frequency.
 
 Always run `teardown.sh` when you're done experimenting.

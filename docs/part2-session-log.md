@@ -13,7 +13,7 @@ Code skill that prevents the next person from doing this iteration cycle.
   Iceberg infra without breaking it.
 - Tools available: `aws-core` and `aws-data-analytics` plugins from the
   Agent Toolkit, `aurora-dsql` MCP, `awslabs.redshift-mcp-server`,
-  `awsknowledge` MCP. **None used during the iteration cycle below — that's
+  `awsknowledge` MCP. **None used during the iteration cycle below - that's
   the lesson.**
 
 ## Issues encountered (chronological)
@@ -29,11 +29,11 @@ does not exist." (Status Code: 404)`
 the namespace `CREATE_COMPLETE` ~500ms after the API call.
 
 **Tried**:
-1. Adding `DependsOn: TableNamespace` — no effect (it was already implicit
+1. Adding `DependsOn: TableNamespace` - no effect (it was already implicit
    via `!Ref`).
-2. Lambda-backed custom resource with 30s of retries (15 × 2s) — failed,
+2. Lambda-backed custom resource with 30s of retries (15 × 2s) - failed,
    namespace still not visible.
-3. Increasing custom-resource retry to 5 min — would have worked but added
+3. Increasing custom-resource retry to 5 min - would have worked but added
    complexity.
 
 **Resolution**: Move table creation OUT of CFN entirely. Created in
@@ -54,7 +54,7 @@ full table-bucket ARN (`arn:aws:s3tables:region:account:bucket/name`). To
 get the bare name we need `!Select [1, !Split ["/", !GetAtt
 TableBucket.TableBucketARN]]`.
 
-**Tried**: `!Ref TableBucket` everywhere → all string interpolations broke
+**Tried**: `!Ref TableBucket` everywhere -> all string interpolations broke
 silently (the bucket-nested catalog ARN became
 `arn:...:catalog/s3tablescatalog/arn:aws:s3tables:...`).
 
@@ -83,7 +83,7 @@ after delete (similar to S3 but longer).
 glue:GetTable for the given table or the table does not exist`.
 
 **Root cause**: Firehose's `IcebergDestinationConfiguration` does a
-`glue:GetTable` synchronously during create — not async. So the Iceberg
+`glue:GetTable` synchronously during create - not async. So the Iceberg
 table has to exist BEFORE the Firehose resource is created.
 
 **Resolution**: Two-phase CFN deploy controlled by an `EnableFirehose`
@@ -144,7 +144,7 @@ skill should answer:
 6. **Redshift workgroup needs a default IAM role** for `CREATE EXTERNAL
    SCHEMA ... IAM_ROLE default` to work. Without it, pass an explicit ARN.
 7. **`destinationDatabaseName`** in Firehose Iceberg config rejects slashes
-   and hyphens — must match `[a-zA-Z0-9._]+`. Use the namespace name only.
+   and hyphens - must match `[a-zA-Z0-9._]+`. Use the namespace name only.
 8. **S3 Tables bucket name cooldown** after delete: ~minutes. Always have a
    suffix parameter to iterate without waiting.
 
@@ -167,7 +167,7 @@ Firehose is delivering, then add the UNION view.
 
 ---
 
-## Update — issues 7-9 (Redshift auto-mount)
+## Update - issues 7-9 (Redshift auto-mount)
 
 ### 7. `!Ref TableBucket` returns the ARN, not the name (revisited)
 
@@ -181,20 +181,20 @@ Fixed by extracting via `!Select [1, !Split ["/", !GetAtt TableBucket.TableBucke
 
 > **Superseded by issue 18 / final code.** Issues 9 and 10 below describe
 > the auto-mount + 3-part `<bucket>@s3tablescatalog.<ns>.<table>` naming
-> approach. The final code abandoned that path entirely — it uses a Glue
+> approach. The final code abandoned that path entirely - it uses a Glue
 > resource link in the default catalog plus `CREATE EXTERNAL SCHEMA cold
 > ... CATALOG_ID '<account-id>'`. Keep these notes for the cautionary
 > tale, but don't replicate the approach.
 
 
-The `s3tablescatalog/<bucket>` Glue catalog has a `CreateDatabaseDefaultPermissions` of `IAM_ALLOWED_PRINCIPALS / ALL`. This is **IAM access control mode** — federated tables are visible only via direct `glue:*` calls + `s3tables:*` data perms, NOT via Redshift auto-mount.
+The `s3tablescatalog/<bucket>` Glue catalog has a `CreateDatabaseDefaultPermissions` of `IAM_ALLOWED_PRINCIPALS / ALL`. This is **IAM access control mode** - federated tables are visible only via direct `glue:*` calls + `s3tables:*` data perms, NOT via Redshift auto-mount.
 
 Redshift's `awsdatacatalog` auto-mount and the `"<bucket>@s3tablescatalog".<ns>.<table>` 3-part syntax both require **Lake Formation access control mode**, where:
 - The bucket is registered as an LF resource (`aws lakeformation register-resource`)
 - The catalog's default permissions exclude `IAM_ALLOWED_PRINCIPALS`
 - LF grants determine all access
 
-Switching modes is account-wide-ish (per-bucket but affects how anything else queries it). For our case it's safe — only the iceberg path uses this bucket. But a skill should warn: "if you have existing IAM-mode S3 Tables and switch one to LF mode, queries from non-LF-aware engines break."
+Switching modes is account-wide-ish (per-bucket but affects how anything else queries it). For our case it's safe - only the iceberg path uses this bucket. But a skill should warn: "if you have existing IAM-mode S3 Tables and switch one to LF mode, queries from non-LF-aware engines break."
 
 ### 10. The naming format I had wrong
 
@@ -213,13 +213,13 @@ Until I added the Admin role, even `sts:AssumeRole/Admin` could not grant LF per
 These should be the bullet points of a future `redshift-serverless-iceberg-coldpath` skill:
 
 9. **`!Ref TableBucket` returns the ARN.** Always extract via Split.
-10. **`AWS::S3Tables::Table` resource handler is unreliable** due to namespace propagation lag — use a script with bash retries.
-11. **`AWS::KinesisFirehose::DeliveryStream` with `IcebergDestinationConfiguration` validates the destination synchronously** — two-phase deploy required.
-12. **`destinationDatabaseName`** in Firehose config rejects slashes/hyphens — must match `[a-zA-Z0-9._]+`.
+10. **`AWS::S3Tables::Table` resource handler is unreliable** due to namespace propagation lag - use a script with bash retries.
+11. **`AWS::KinesisFirehose::DeliveryStream` with `IcebergDestinationConfiguration` validates the destination synchronously** - two-phase deploy required.
+12. **`destinationDatabaseName`** in Firehose config rejects slashes/hyphens - must match `[a-zA-Z0-9._]+`.
 13. **The bucket-nested catalog ARN is** `arn:aws:glue:<region>:<account>:catalog/s3tablescatalog/<bucket-name>`. Database name is the namespace alone.
 14. **For Redshift auto-mount of S3 Tables**, the bucket integration must be in **Lake Formation access control mode**, not IAM mode. Set `AllowFullTableExternalDataAccess=False` and `CreateDatabaseDefaultPermissions=[]` (no IAM_ALLOWED_PRINCIPALS) when creating the catalog.
-15. **Three-part naming for S3 Tables** is `"<bucket>@s3tablescatalog".<namespace>.<table>` — note the `@` separator and the double quotes.
-16. **`ada credentials update` writes to a non-default profile** — use `AWS_PROFILE=...` to switch.
+15. **Three-part naming for S3 Tables** is `"<bucket>@s3tablescatalog".<namespace>.<table>` - note the `@` separator and the double quotes.
+16. **`ada credentials update` writes to a non-default profile** - use `AWS_PROFILE=...` to switch.
 17. **LF `GrantPermissions` requires the caller to be a Data Lake Administrator**, not just an IAM admin. Add yourself via `put-data-lake-settings` first.
 
 ## Time totals
@@ -236,7 +236,7 @@ These should be the bullet points of a future `redshift-serverless-iceberg-coldp
 
 ---
 
-## Update — issues 13-18 (transform Lambda, deploy idempotency, NO SCHEMA BINDING)
+## Update - issues 13-18 (transform Lambda, deploy idempotency, NO SCHEMA BINDING)
 
 The session-resumption point above ("phase 2 deployed successfully, blocker is
 external schema needing IAM role") buried the real bug: **Firehose was
@@ -248,7 +248,7 @@ with `Iceberg.MissingColumnWithinRecord`.
 `AWS::KinesisFirehose::DeliveryStream`'s `IcebergDestinationConfiguration`
 takes the top-level JSON keys of each Kinesis record and maps them to
 columns by name. DSQL CDC records are
-`{op, after, before, source, ts_ms, ...}` — those keys share **nothing**
+`{op, after, before, source, ts_ms, ...}` - those keys share **nothing**
 with the Iceberg columns (`source_table, operation, record_id, event_data,
 commit_timestamp, ingested_at`). Firehose rejects every record.
 
@@ -259,7 +259,7 @@ on what each event means.
 
 **Skill bullet**: any direct Kinesis -> Iceberg pipe needs a transform
 unless the producer ALREADY emits the destination column shape. The
-docs describe this — but the absence of `ProcessingConfiguration` in
+docs describe this - but the absence of `ProcessingConfiguration` in
 the CFN doesn't surface as a static error, only as 100% delivery
 failures into the error bucket.
 
@@ -275,7 +275,7 @@ be sent in microseconds" but it's a one-line note buried under
 `deploy` reuses the stack's previous parameter values for any flag not
 in `--parameter-overrides`. On a re-run against an already-stream-enabled
 stack, an unspecified `EnableFirehoseStream` inherits "true" from the
-prior deploy — yielding `WantFirehoseStream` without `WantFirehose` and
+prior deploy - yielding `WantFirehoseStream` without `WantFirehose` and
 "unresolved resource dependencies" because the stream's role / log
 group / error bucket are gated on `WantFirehose`.
 
@@ -289,13 +289,13 @@ name-reservation cooldown blocks immediate recreation anyway.
 EnableFirehoseStream=false`), keeping the error bucket / role / Lambda
 across re-runs and only toggling the stream itself. The original
 phasing assumed Phase 1 needed `EnableFirehose=false` to "create just
-the bucket and namespace before the table" — but Phase A creates the
+the bucket and namespace before the table" - but Phase A creates the
 namespace too, so Phase 1 was redundant.
 
 ### 16. `lakeformation grant-permissions` failures were swallowed by `|| true`
 
 The original deploy script appended `|| true` to LF grants on the
-theory they were idempotent. They are — for "already exists" — but
+theory they were idempotent. They are - for "already exists" - but
 `AccessDenied` (caller is not a Data Lake Admin) hit the same `|| true`
 and the missing grants then surfaced as opaque
 `Firehose: Role ... is not authorized to perform: glue:GetTable`
@@ -321,7 +321,7 @@ a profile env var through every run.
 
 `CREATE VIEW ... AS SELECT ... FROM cold.cdc_events_archive` fails with
 `External tables are not supported in views`. Fix: append
-`WITH NO SCHEMA BINDING` — and as a transitive consequence, every view
+`WITH NO SCHEMA BINDING` - and as a transitive consequence, every view
 that references `cdc_events_all` (which references the external table)
 also needs it.
 
@@ -339,15 +339,15 @@ Two side effects to know:
 These are bullets a future `redshift-serverless-iceberg-coldpath` skill
 should lead with:
 
-1. **`!Ref TableBucket` returns the ARN** — extract via `!Select [1,
+1. **`!Ref TableBucket` returns the ARN** - extract via `!Select [1,
    !Split ["/", !GetAtt TableBucket.TableBucketARN]]`.
-2. **`AWS::S3Tables::Table` resource handler is unreliable** — namespace
+2. **`AWS::S3Tables::Table` resource handler is unreliable** - namespace
    propagation lag of 5+ minutes; create the table in a script with
    bash retries, not in CFN.
 3. **`AWS::KinesisFirehose::DeliveryStream` validates the Iceberg
-   destination synchronously** at create time — table must exist first
+   destination synchronously** at create time - table must exist first
    (two-phase deploy).
-4. **`destinationDatabaseName` rejects slashes/hyphens** — must match
+4. **`destinationDatabaseName` rejects slashes/hyphens** - must match
    `[a-zA-Z0-9._]+`. Use the namespace name only.
 5. **Bucket-nested catalog ARN** is
    `arn:aws:glue:<region>:<account>:catalog/s3tablescatalog/<bucket>`.
@@ -356,21 +356,21 @@ should lead with:
    on the bucket integration.
 7. **Three-part naming** is `"<bucket>@s3tablescatalog".<ns>.<table>`,
    not `awsdatacatalog.<...>.<ns>.<table>`.
-8. **`ada credentials update`** writes to a non-default profile — use
+8. **`ada credentials update`** writes to a non-default profile - use
    `AWS_PROFILE=...`.
-9. **LF GrantPermissions requires Data Lake Admin** — add the default
+9. **LF GrantPermissions requires Data Lake Admin** - add the default
    identity via `put-data-lake-settings` (preserve existing admins).
 10. **Firehose direct Kinesis -> Iceberg maps top-level JSON keys to
-    columns by name** — needs a transform Lambda unless the producer
+    columns by name** - needs a transform Lambda unless the producer
     already emits the destination shape.
 11. **Iceberg `timestamp` columns expect microseconds in JSON.**
 12. **`aws cloudformation deploy` inherits prior parameter values** for
-    unspecified flags — pin every flag explicitly OR design phases so
+    unspecified flags - pin every flag explicitly OR design phases so
     re-runs don't toggle destructive flags.
-13. **Don't swallow LF grant errors with `|| true`** — `AccessDenied`
+13. **Don't swallow LF grant errors with `|| true`** - `AccessDenied`
     must abort, only "already exists" should be ignored.
 14. **Redshift views over external tables need `WITH NO SCHEMA BINDING`**
-    — and all referenced relations must be schema-qualified.
+    - and all referenced relations must be schema-qualified.
 
 ## Time totals (updated)
 
@@ -391,15 +391,15 @@ This session (continuation): ~90 min, broken down:
 
 **Total Part 2: ~200 min** for what a single skill should have made a
 40-min task. The skill, when written, must call out items 10-14 above
-explicitly — those were the ones that ate the most time in this
+explicitly - those were the ones that ate the most time in this
 continuation.
 
-## Update — hot/cold tiering automation
+## Update - hot/cold tiering automation
 
 Until this point, hot (`cdc_events`) and cold (`cold.cdc_events_archive`)
 both grew forever in parallel. The unified view (`cdc_events_all`) does
 the time-window split at query time, so duplicates exist on disk but are
-deduped in queries. Functional, but unbounded — production needs to
+deduped in queries. Functional, but unbounded - production needs to
 prune hot.
 
 ### Design choice: Step Functions over a Lambda
@@ -424,7 +424,7 @@ to this pipeline:
    abort" decision is a one-line `Choice` with the result path threaded
    through. In a Lambda it's one more `if` block to read, one more
    branch to test. Concurrent with the SF AWS-SDK integration, this
-   means the entire prune is zero lines of business code — the state
+   means the entire prune is zero lines of business code - the state
    machine definition is the implementation.
 
 ### Safety-check semantics
@@ -440,31 +440,31 @@ Sharp edges:
   An earlier draft computed `DATEADD(hour, -RetentionHours, GETDATE())`
   inside the SafetyCheck SQL *and* the DELETE SQL. Code review caught
   that this defeats the safety claim: SafetyCheck and DELETE would run
-  1–3 minutes apart, so rows whose `commit_timestamp` crossed the
+  1-3 minutes apart, so rows whose `commit_timestamp` crossed the
   cutoff during execution could be DELETEd from hot without ever
   having been verified in cold. The fixed shape resolves the cutoff
   once via a `SubmitResolveCutoff` step and pins the result into
   `$.cutoff.value`; both predicates use that pinned literal.
 - **The check is "any rows older than cutoff", not "the same rows".**
   We don't compare primary keys hot-vs-cold. That would be safer but
-  much more expensive — cold is in S3 Tables, scanning per-PK costs
+  much more expensive - cold is in S3 Tables, scanning per-PK costs
   more than the prune saves. The "any rows older" check is a coarse
   proxy: if Firehose has flushed *anything* for the window, it has
   almost certainly flushed *everything*, because Firehose is a
   monotonic stream. The failure mode it doesn't catch is "Firehose
-  flushed events 1–1000 successfully, then transform Lambda errors
-  caused 1001–2000 to land in the error bucket". The CloudWatch
+  flushed events 1-1000 successfully, then transform Lambda errors
+  caused 1001-2000 to land in the error bucket". The CloudWatch
   alarm on transform Lambda errors is the second line of defense for
-  that one — see "Production hardening" below.
+  that one - see "Production hardening" below.
 - **`COUNT(*)` on Iceberg should be cheap in Redshift.** Spectrum can
   satisfy a `COUNT(*) WHERE timestamp < cutoff` predicate by walking
   the Iceberg manifest's per-file min/max stats, without scanning
   parquet content. Not benchmarked in this stack; assume "tens of ms"
   rather than "single-digit ms" until measured.
 - **Aborts surface as FAILED executions.** An earlier draft had the
-  abort path end with `Succeed`, which buried the signal — operators
+  abort path end with `Succeed`, which buried the signal - operators
   scanning for failures would see only green. Fixed shape: `Abort
-  → SNS publish → Fail`, so console + email both light up.
+  -> SNS publish -> Fail`, so console + email both light up.
 
 ### Schedule defaults
 
@@ -472,7 +472,7 @@ Sharp edges:
   manual (`aws stepfunctions start-execution`). Two reasons: (a) gives
   the operator a chance to verify the SafetyCheck matches their mental
   model of what's in cold; (b) catches the common case where the stack
-  was deployed before the cold path had ever flushed — the manual run
+  was deployed before the cold path had ever flushed - the manual run
   fires AbortNoArchive and surfaces the issue immediately, instead of
   EventBridge silently aborting daily for a week.
 - **Demo: `rate(1 day)`, retention 24h.** Mirrors the unified view's
@@ -483,14 +483,14 @@ Sharp edges:
   monthly prune that deletes ~30 days at once amortizes the
   VACUUM cost across thirty deletions worth of holes.
 
-### Production hardening (deferred — call out in the post)
+### Production hardening (deferred - call out in the post)
 
 What this stack does NOT yet do, that it should before being trusted on
 real data:
 
 - **Alarm on transform Lambda error rate.** If `dsql-cdc-iceberg-transform`
   is dropping records, the cold archive count grows at less than the
-  rate it should — but still grows, so the SafetyCheck still passes.
+  rate it should - but still grows, so the SafetyCheck still passes.
   Need a separate CloudWatch alarm wired to the same SNS topic: gate
   the schedule on the alarm's state, not just on the SafetyCheck.
 - **Alarm on Firehose `DeliveryToIceberg.SuccessfulRowCount` going to
@@ -501,7 +501,7 @@ real data:
   the sort order. If the table ever sees in-place updates (current
   schema doesn't, but if a future revision did), upgrade to plain
   `VACUUM`.
-- **`DeletionPolicy: Snapshot` on Redshift in the base stack** — the
+- **`DeletionPolicy: Snapshot` on Redshift in the base stack** - the
   README already calls this out. Tiering doesn't change the
   recommendation, but if you're committing to the prune, the snapshot
   policy matters more, not less.
@@ -532,7 +532,7 @@ with `TIERING_SCHEDULE_STATE=DISABLED` and `TIERING_RETENTION_HOURS=24`.
 
 CFN outcome: `CREATE_COMPLETE` in ~30s. SecretArn resolved to
 `arn:aws:secretsmanager:us-east-1:239355724610:secret:redshift!dsql-cdc-ns-admin-9HxJrR`
-(full ARN with the 6-char Secrets Manager suffix — the fix from the
+(full ARN with the 6-char Secrets Manager suffix - the fix from the
 review pass). All 7 resources reached CREATE_COMPLETE without error.
 
 Pre-prune state:
@@ -545,16 +545,16 @@ Triggered one manual execution via `aws stepfunctions start-execution`.
 `get-execution-history`):
 
 ```
-InitResolveCutoffPoll → SubmitResolveCutoff → DescribeResolveCutoff
-  → ResolveCutoffDone → ReadCutoff → PinCutoff
-  → InitSafetyCheckPoll → SubmitSafetyCheck → DescribeSafetyCheck
-  → SafetyCheckDone(loop once via IncrementSafetyCheckPoll)
-  → DescribeSafetyCheck → SafetyCheckDone(FINISHED)
-  → ReadSafetyResult → SafetyChoice
-  → InitDeletePoll → SubmitDelete → DescribeDelete → DeleteDone
-  → InitVacuumPoll → SubmitVacuum → DescribeVacuum → VacuumDone
-  → InitAnalyzePoll → SubmitAnalyze → DescribeAnalyze → AnalyzeDone
-  → Success
+InitResolveCutoffPoll -> SubmitResolveCutoff -> DescribeResolveCutoff
+  -> ResolveCutoffDone -> ReadCutoff -> PinCutoff
+  -> InitSafetyCheckPoll -> SubmitSafetyCheck -> DescribeSafetyCheck
+  -> SafetyCheckDone(loop once via IncrementSafetyCheckPoll)
+  -> DescribeSafetyCheck -> SafetyCheckDone(FINISHED)
+  -> ReadSafetyResult -> SafetyChoice
+  -> InitDeletePoll -> SubmitDelete -> DescribeDelete -> DeleteDone
+  -> InitVacuumPoll -> SubmitVacuum -> DescribeVacuum -> VacuumDone
+  -> InitAnalyzePoll -> SubmitAnalyze -> DescribeAnalyze -> AnalyzeDone
+  -> Success
 ```
 
 Exactly the design path. The poll-loop counter pattern works correctly
@@ -563,14 +563,14 @@ Exactly the design path. The poll-loop counter pattern works correctly
 Post-prune state:
 - Hot `cdc_events`: **186,938 rows; oldest 2026-06-08 06:07:59 UTC.**
   That cutoff is "execution start (06-09 06:07:59 UTC) minus 24h" to
-  the second — the **pinned cutoff is honored exactly**. The earlier-
+  the second - the **pinned cutoff is honored exactly**. The earlier-
   draft cutoff-drift bug would have produced an `oldest` value 1-3
   minutes older; we don't see that, so the pin holds under live load.
 - Unified view `cdc_events_all`: hot=186,693 + cold=599,646 = 786,339
   rows with the time-window split applied. No data lost.
 
 **DELETE pruned 1,703,084 rows in a single execution.** VACUUM DELETE
-ONLY + ANALYZE both completed within the 31-second total runtime —
+ONLY + ANALYZE both completed within the 31-second total runtime -
 well under the 1-hour state-machine timeout and the per-step
 720-attempt poll cap.
 
@@ -580,7 +580,7 @@ What this validates that static checks could not have:
   The earlier-draft truncated ARN would have failed every execution
   at SubmitSafetyCheck.
 - `States.Format(... TIMESTAMP \'{}\'', $.cutoff.value)` rendered the
-  correct SQL — pinned-cutoff matched the post-prune `oldest` to the
+  correct SQL - pinned-cutoff matched the post-prune `oldest` to the
   second.
 - `aws:SourceAccount` condition on the SFN trust policy did not block
   Step Functions itself from invoking the role.
@@ -590,13 +590,13 @@ What this validates that static checks could not have:
 - `ANALYZE cdc_events` works as the post-DELETE stats refresh step.
 
 What's NOT yet validated:
-- Schedule firing on the EventBridge clock — schedule deployed
+- Schedule firing on the EventBridge clock - schedule deployed
   DISABLED. To enable, re-run with `TIERING_SCHEDULE_STATE=ENABLED`
   after watching at least one more manual prune.
-- AbortNoArchive path — would only fire if cold had no rows older
+- AbortNoArchive path - would only fire if cold had no rows older
   than the cutoff. Today there are plenty. The path is structurally
   identical to Success aside from the Choice routing.
-- SNS email subscription — `TIERING_ALERT_EMAIL` was empty for this
+- SNS email subscription - `TIERING_ALERT_EMAIL` was empty for this
   deploy. Re-run with the email set or add a subscription via console.
 
 ### Soak monitoring (paste-ready when you come back in N days)
@@ -606,7 +606,7 @@ auto-prune fires roughly 24h later (~23:23 UTC daily). gujain@amazon.com
 is subscribed to the SNS alert topic (pending click-to-confirm); failures
 or aborts will email there.
 
-**Signal 1 — every scheduled prune completed SUCCEEDED:**
+**Signal 1 - every scheduled prune completed SUCCEEDED:**
 
 ```bash
 export AWS_REGION=us-east-1
@@ -624,7 +624,7 @@ aws stepfunctions list-executions \
     }' \
     --output table
 
-# Should be all SUCCEEDED. Any FAILED or ABORTED → drill in:
+# Should be all SUCCEEDED. Any FAILED or ABORTED -> drill in:
 aws stepfunctions list-executions \
     --state-machine-arn "${SM_ARN}" \
     --status-filter FAILED \
@@ -632,7 +632,7 @@ aws stepfunctions list-executions \
     --output text
 ```
 
-**Signal 2 — latency drift (how long each prune took):**
+**Signal 2 - latency drift (how long each prune took):**
 
 ```bash
 # Subtract stopDate − startDate per execution; flag the trend.
@@ -661,7 +661,7 @@ for line in sys.stdin:
 "
 ```
 
-**Signal 3 — no data loss (cold has rows for every window hot pruned):**
+**Signal 3 - no data loss (cold has rows for every window hot pruned):**
 
 ```bash
 SECRET_ARN=$(aws secretsmanager describe-secret \
@@ -700,7 +700,7 @@ Expected after a clean N-day soak:
 | cold  | growing        | 2026-06-05 ...          | within ~1 min  |
 | hot   | small (~24h)   | NOW − 24h ± 1h          | within ~10 sec |
 
-**Signal 4 — SNS alarm count (did anything publish to email):**
+**Signal 4 - SNS alarm count (did anything publish to email):**
 
 ```bash
 # Number of failure/abort messages published in last 7 days.

@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
 # One-shot bootstrap: runs every script in order. Safe to re-run.
 #
-# Always deploys the base pipeline (DSQL → Kinesis → Lambda → Redshift).
+# Always deploys the base pipeline (DSQL -> Kinesis -> Lambda -> Redshift).
 # Two optional add-on stacks are offered interactively after the base
 # pipeline succeeds:
-#   - Always-on order simulator (Fargate)        — for continuous traffic
-#   - SageMaker access role + Redshift grants    — for notebook analytics
+#   - Always-on order simulator (Fargate)        - for continuous traffic
+#   - SageMaker access role + Redshift grants    - for notebook analytics
 #
 # Required tools: aws, psql, zip
 # Required env (or accept defaults):

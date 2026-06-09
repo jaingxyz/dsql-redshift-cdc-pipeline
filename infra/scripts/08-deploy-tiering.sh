@@ -21,9 +21,9 @@
 #   PROJECT_NAME          must match the base stack       (default: dsql-cdc)
 #   AWS_REGION            must match the base stack       (default: us-east-1)
 #   TIERING_STACK_NAME    name of the tiering CFN stack   (default: ${PROJECT_NAME}-tiering)
-#   TIERING_RETENTION_HOURS  hot retention window         (default: 24 — demo)
+#   TIERING_RETENTION_HOURS  hot retention window         (default: 24 - demo)
 #   TIERING_SCHEDULE      EventBridge Scheduler expression (default: rate(1 day))
-#   TIERING_SCHEDULE_STATE  ENABLED|DISABLED              (default: DISABLED — manual first)
+#   TIERING_SCHEDULE_STATE  ENABLED|DISABLED              (default: DISABLED - manual first)
 #   TIERING_ALERT_EMAIL   email to subscribe to alerts    (default: empty)
 set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -43,7 +43,7 @@ check_aws_creds
 
 # Sanity check: base + iceberg stacks must both exist. The safety check
 # also requires the `cold` external schema and the cdc_events_archive
-# Iceberg table to be queryable from Redshift — both are created by
+# Iceberg table to be queryable from Redshift - both are created by
 # 07-deploy-iceberg.sh's POST-stack steps, not by the iceberg CFN stack
 # itself. We validate the stacks here; if the schema/table aren't yet
 # applied, the first manual prune execution will fail at SubmitSafetyCheck
@@ -64,7 +64,7 @@ ok "Base + iceberg stacks present"
 # convention) because CFN doesn't surface AdminPasswordSecretArn as a
 # GetAtt on the Namespace. Step Functions' executeStatement integration
 # requires the FULL ARN including the 6-char random suffix Secrets
-# Manager appends — partial-match wildcards aren't accepted there. So we
+# Manager appends - partial-match wildcards aren't accepted there. So we
 # resolve it now and pass as a CFN parameter into the tiering stack.
 SECRET_NAME=$(stack_output_from "${STACK_NAME}" RedshiftAdminSecretName)
 [ -n "${SECRET_NAME}" ] || err "RedshiftAdminSecretName output missing on ${STACK_NAME}"
@@ -120,7 +120,7 @@ echo "  Schedule:       ${SCHEDULE_NAME} (${TIERING_SCHEDULE_STATE})"
 echo "  Alert topic:    ${ALERT_TOPIC}"
 [ -n "${TIERING_ALERT_EMAIL}" ] && echo "  Alert email:    ${TIERING_ALERT_EMAIL} (confirm subscription in your inbox)"
 echo
-echo "Recommended next step — manual one-shot prune to verify the safety"
+echo "Recommended next step - manual one-shot prune to verify the safety"
 echo "check works against live data:"
 echo
 echo "    aws stepfunctions start-execution \\"
@@ -129,9 +129,9 @@ echo "        --region ${AWS_REGION}"
 echo
 echo "Watch the execution in the Step Functions console. Expected outcomes:"
 echo "  - Cold archive has rows older than ${TIERING_RETENTION_HOURS}h:"
-echo "    SafetyCheck → SubmitDelete → Vacuum → Analyze → Success."
+echo "    SafetyCheck -> SubmitDelete -> Vacuum -> Analyze -> Success."
 echo "  - Cold archive empty for that window:"
-echo "    SafetyCheck → AbortNoArchive (publishes SNS, ends successfully)."
+echo "    SafetyCheck -> AbortNoArchive (publishes SNS, ends successfully)."
 echo
 if [ "${TIERING_SCHEDULE_STATE}" = "DISABLED" ]; then
     echo "When you're satisfied with the manual run, enable the schedule by"
@@ -139,7 +139,7 @@ if [ "${TIERING_SCHEDULE_STATE}" = "DISABLED" ]; then
     echo
     echo "    TIERING_SCHEDULE_STATE=ENABLED ./infra/scripts/08-deploy-tiering.sh"
     echo
-    echo "(Don't use 'aws scheduler update-schedule' for this — it's a"
+    echo "(Don't use 'aws scheduler update-schedule' for this - it's a"
     echo "full-replace API and would lose Input, RetryPolicy, and timezone."
     echo "The CFN stack reapplies all those fields together.)"
 fi

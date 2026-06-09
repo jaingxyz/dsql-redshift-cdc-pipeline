@@ -21,7 +21,7 @@ Parameters:
     Description: >
       Full ARN of the Redshift admin secret, including the 6-char random
       suffix Secrets Manager appends. The base stack only exports the
-      secret name, not the resolved ARN — 08-deploy-tiering.sh resolves
+      secret name, not the resolved ARN - 08-deploy-tiering.sh resolves
       it via `aws secretsmanager describe-secret` and passes it here.
       Required because Step Functions' executeStatement integration
       validates SecretArn strictly (no wildcard partial match).
@@ -76,7 +76,7 @@ Parameters:
     Type: Number
     Default: 720
     Description: >
-      Per-step poll-loop maximum (Wait → Describe cycles). At 5s
+      Per-step poll-loop maximum (Wait -> Describe cycles). At 5s
       average wait, 720 = ~1h ceiling per step before that step gives
       up and routes to FailWithAlarm. The state-machine-level
       ExecutionTimeoutSeconds is the real backstop; this just keeps
@@ -143,7 +143,7 @@ Resources:
             Version: "2012-10-17"
             Statement:
               # Redshift Data API actions don't support resource-level
-              # permissions — Resource: "*" is the only valid value. The
+              # permissions - Resource: "*" is the only valid value. The
               # secret-arn passed at runtime is the real authn boundary.
               - Effect: Allow
                 Action:
@@ -168,7 +168,7 @@ Resources:
             Version: "2012-10-17"
             # Step Functions writes execution logs through CloudWatch
             # Logs vending policy. Cannot scope to a specific log group
-            # at the IAM layer — SFN creates per-execution streams under
+            # at the IAM layer - SFN creates per-execution streams under
             # /aws/vendedlogs/states/. Resource: "*" is the documented
             # form for this integration.
             Statement:
@@ -206,7 +206,7 @@ Resources:
   #   5. SubmitVacuum: VACUUM DELETE ONLY cdc_events
   #   6. SubmitAnalyze: ANALYZE cdc_events
   #
-  # Each Redshift call uses a Submit + (Wait → Describe → Choice) subloop
+  # Each Redshift call uses a Submit + (Wait -> Describe -> Choice) subloop
   # because the Data API is async (ExecuteStatement returns immediately;
   # DescribeStatement reports terminal state). The Choice loops back via
   # an iteration counter (PollAttempt) bounded by PollMaxAttempts; if the
@@ -569,12 +569,12 @@ Resources:
       Target:
         Arn: !GetAtt PruneStateMachine.Arn
         RoleArn: !GetAtt SchedulerRole.Arn
-        # Empty input — the state machine doesn't need any per-invocation
+        # Empty input - the state machine doesn't need any per-invocation
         # parameters. Retention horizon is baked into the definition.
         Input: "{}"
         RetryPolicy:
           # Up to 3 retries over a max age of 6 hours. Beyond that, the
-          # scheduler gives up on the missed window — the next scheduled
+          # scheduler gives up on the missed window - the next scheduled
           # run will pick up the larger backlog (DELETE is set-based, so
           # extra rows only matter for VACUUM duration).
           MaximumRetryAttempts: 3

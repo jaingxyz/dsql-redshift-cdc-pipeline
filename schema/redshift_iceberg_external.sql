@@ -1,10 +1,10 @@
 -- Hot + cold unified view layer for the CDC pipeline.
 --
 -- Two paths write the SAME Kinesis CDC stream into two stores:
---   * HOT  — the cdc_processor Lambda appends to local `cdc_events`
+--   * HOT  - the cdc_processor Lambda appends to local `cdc_events`
 --            (SUPER event_data). Fast, full Redshift performance, but we
 --            only keep it small / recent.
---   * COLD — Firehose appends to the S3 Tables Iceberg table, surfaced
+--   * COLD - Firehose appends to the S3 Tables Iceberg table, surfaced
 --            in Redshift as the external schema `cold.cdc_events_archive`
 --            (event_data is a JSON *string*; JSON_PARSE recovers SUPER).
 --            Cheap, durable, unbounded retention, slower to scan.
@@ -30,7 +30,7 @@
 -- Normalizes hot and cold into one shape (event_data as SUPER) and tags
 -- each row with its origin so you can see the hot/cold split. This is
 -- still an *event log* (one row per CDC event, duplicates included), not
--- current state — the *_unified views below collapse it.
+-- current state - the *_unified views below collapse it.
 --
 -- The hot side prunes to the recent window and the cold side to the
 -- older window so the two stores don't double-scan the overlap on every
@@ -43,7 +43,7 @@
 -- TODO(retention coupling): the 24-hour literal appears in two WHERE
 -- clauses below and in cloudformation-tiering.yaml's RetentionHours
 -- parameter. If you change the tiering retention you MUST update both
--- clauses below — Redshift doesn't support parameterized DDL for views.
+-- clauses below - Redshift doesn't support parameterized DDL for views.
 -- Forgetting to update one direction silently widens or narrows the
 -- visible window; correctness is preserved by dedup but cost and freshness
 -- shift unexpectedly. A future pass could move this to a single source
@@ -54,7 +54,7 @@
 -- external (Spectrum / federated catalog) table. Without it Redshift
 -- rejects with "External tables are not supported in views". The cost
 -- is that the view stops blocking schema changes on cdc_events_archive
--- — fine here because the Iceberg schema is fixed by the deploy script.
+-- - fine here because the Iceberg schema is fixed by the deploy script.
 -- All downstream views (orders_unified etc.) reference cdc_events_all,
 -- so they each need NO SCHEMA BINDING too.
 CREATE OR REPLACE VIEW cdc_events_all AS

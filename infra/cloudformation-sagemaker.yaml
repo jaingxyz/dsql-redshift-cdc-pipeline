@@ -88,7 +88,7 @@ Resources:
               Fn::ImportValue: !Sub "${ProjectName}-redshift-workgroup-arn"
 
           # Data API actions. redshift-data has no resource-level
-          # support — Resource:* is the only valid value (same
+          # support - Resource:* is the only valid value (same
           # constraint the base stack's Lambda hits).
           - Sid: RedshiftDataApi
             Effect: Allow
