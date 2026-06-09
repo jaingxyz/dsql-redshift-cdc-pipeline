@@ -83,42 +83,6 @@ End-to-end latency from a row change in DSQL to an insert in Redshift is
 typically under 10 seconds. The entire stack is serverless: idle cost is
 near-zero, active cost scales linearly with traffic.
 
-## What's in here
-
-```
-.
-├── infra/                          # Infrastructure as code
-│   ├── cloudformation.yaml         # DSQL cluster, Kinesis, IAM, Redshift, Lambda, event source
-│   ├── cloudformation-simulator.yaml   # Optional: always-on Fargate order simulator
-│   ├── cloudformation-sagemaker.yaml   # Optional: SageMaker exec role + Redshift access
-│   ├── cloudformation-iceberg.yaml     # Optional: Firehose -> S3 Tables Iceberg cold path
-│   ├── cloudformation-tiering.yaml     # Optional: Step Functions prune of cdc_events older than 24h
-│   ├── scripts/
-│   │   ├── bootstrap.sh         # One-shot orchestrator
-│   │   ├── 01-deploy-cfn.sh
-│   │   ├── 02-create-cdc-stream.sh
-│   │   ├── 03-load-schemas.sh
-│   │   ├── 04-deploy-lambda-code.sh
-│   │   ├── 05-deploy-simulator.sh
-│   │   ├── 06-deploy-sagemaker.sh
-│   │   ├── 07-deploy-iceberg.sh
-│   │   ├── 08-deploy-tiering.sh
-│   │   ├── teardown.sh
-│   │   └── _lib.sh              # Shared helpers
-│   └── README.md                # Detailed infrastructure docs
-├── schema/
-│   ├── dsql_schema.sql          # Source schema (customers, products, orders, order_items)
-│   └── redshift_schema.sql      # Append-only event log + current-state views
-├── app/
-│   ├── cdc_processor.py         # Lambda: Kinesis -> parameterized inserts into Redshift
-│   └── order_simulator.py       # Realistic order activity generator
-├── analytics/
-│   └── sample_queries.sql       # 6 use-case queries
-├── LICENSE                      # AGPL-3.0
-├── NOTICE                       # Attributions and AI-authorship disclosure
-└── README.md
-```
-
 ## Quick start
 
 Prerequisites: AWS CLI v2 (configured), `psql`, `zip`, and a Python 3.11+
