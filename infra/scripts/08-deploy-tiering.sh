@@ -72,8 +72,9 @@ SECRET_ARN=$(aws secretsmanager describe-secret \
     --secret-id "${SECRET_NAME}" \
     --region "${AWS_REGION}" \
     --query 'ARN' --output text 2>/dev/null || true)
-[ -n "${SECRET_ARN}" ] && [ "${SECRET_ARN}" != "None" ] \
-    || err "Could not resolve Redshift admin secret ARN. Is the base stack fully deployed?"
+if [ -z "${SECRET_ARN}" ] || [ "${SECRET_ARN}" = "None" ]; then
+    err "Could not resolve Redshift admin secret ARN. Is the base stack fully deployed?"
+fi
 log "Redshift admin secret: ${SECRET_ARN}"
 
 # ---------------------------------------------------------------------------
