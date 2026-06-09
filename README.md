@@ -25,22 +25,59 @@ flowchart LR
     DSQL[("Aurora DSQL<br/>cluster")]
     CDC["DSQL CDC stream<br/><i>(public preview)</i>"]
     KS["Kinesis Data Streams<br/>on-demand"]
-    LAMBDA["Lambda<br/>cdc_processor.py<br/>parameterized SQL"]
-    RS[("Redshift Serverless<br/>cdc_events log<br/>+ current-state views")]
+
+    HOT["Lambda<br/>cdc_processor.py<br/>parameterized SQL"]
+    RS[("Redshift Serverless<br/>cdc_events<br/>(append-only)")]
+
+    FH["Firehose<br/>(buffered tee)"]
+    TFM["Lambda<br/>firehose_transform.py<br/>reshape + microsecond ts"]
+    ICE[("S3 Tables Iceberg<br/>cold.cdc_events_archive")]
+
+    UNI["Unified views<br/>cdc_events_all<br/>+ *_unified"]
+
+    SCHED["EventBridge<br/>Scheduler<br/>rate(1 day)"]
+    SFN["Step Functions<br/>SafetyCheck -&gt; DELETE<br/>-&gt; VACUUM -&gt; ANALYZE"]
+    SNS["SNS topic<br/>tiering-alerts"]
+
     USER["Analyst / dashboard /<br/>ML / fraud / inventory"]
 
     APP -->|"INSERT /<br/>UPDATE /<br/>DELETE"| DSQL
     DSQL -.->|"row-level<br/>changes"| CDC
-    CDC -->|"JSON events"| KS
-    KS -->|"event source<br/>mapping"| LAMBDA
-    LAMBDA -->|"Redshift<br/>Data API"| RS
-    USER -.->|"queries"| RS
+    CDC -->|"JSON envelope"| KS
+
+    KS -->|"event source<br/>mapping"| HOT
+    HOT -->|"Redshift<br/>Data API"| RS
+
+    KS -->|"buffered tee<br/>(60s / 64MB)"| FH
+    FH -->|"per-record<br/>transform"| TFM
+    TFM -->|"reshaped<br/>JSON"| FH
+    FH -->|"Iceberg<br/>append"| ICE
+
+    RS -.->|"hot side<br/>(< 24h)"| UNI
+    ICE -.->|"cold side<br/>(>= 24h, via<br/>external schema)"| UNI
+    USER -.->|"queries"| UNI
+
+    SCHED -->|"daily<br/>StartExecution"| SFN
+    SFN -->|"safety check:<br/>cold count > 0"| ICE
+    SFN -->|"DELETE old rows<br/>+ VACUUM + ANALYZE"| RS
+    SFN -.->|"abort or fail"| SNS
 
     classDef serverless fill:#e8f4f8,stroke:#0277bd,color:#01579b
     classDef preview fill:#fff3e0,stroke:#e65100,color:#bf360c
-    class DSQL,KS,LAMBDA,RS serverless
+    classDef tiering fill:#f3e5f5,stroke:#6a1b9a,color:#4a148c
+    class DSQL,KS,HOT,RS,FH,TFM,ICE,UNI serverless
     class CDC preview
+    class SCHED,SFN,SNS tiering
 ```
+
+The hot path streams every CDC event from DSQL into a Redshift Serverless
+append-only `cdc_events` log within seconds. A Firehose tee delivers the
+same events into an Iceberg table on S3 Tables for cheap, durable cold
+storage. A unified view layer in Redshift presents one query surface
+spanning hot (recent) and cold (history). A daily Step Functions state
+machine prunes hot rows older than the retention horizon, gated on the
+cold archive having received rows for the same window so no event is
+lost in transit.
 
 End-to-end latency from a row change in DSQL to an insert in Redshift is
 typically under 10 seconds. The entire stack is serverless: idle cost is
