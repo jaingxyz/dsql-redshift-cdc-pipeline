@@ -200,9 +200,9 @@ Switching modes is account-wide-ish (per-bucket but affects how anything else qu
 
 I tried `awsdatacatalog."s3tablescatalog/<bucket>".<ns>.<table>` (4-part). **Wrong.** Correct: `"<bucket>@s3tablescatalog".<ns>.<table>` (3-part with quoted catalog using `@` separator).
 
-### 11. ada credentials don't change default profile
+### 11. Custom credential helpers write to a non-default profile
 
-`ada credentials update --account X --role Admin` writes to a separate profile (e.g. `gujain_acnt_isen_ada`), not the default. Use `AWS_PROFILE=gujain_acnt_isen_ada` to actually use it.
+If your shop uses a credential-refresh helper (e.g., AWS SSO, a custom credential broker, an internal `aws sts assume-role` wrapper), confirm where it writes. Many such tools land tokens in a named profile (e.g., `~/.aws/credentials` under a per-account section), not in the default profile. The shell scripts in this repo all read the default profile unless `AWS_PROFILE` is exported. Mismatch = `aws sts get-caller-identity` shows the wrong identity, deploys land in the wrong account, and the failure mode is silent until a permission check trips.
 
 ### 12. SageMaker role was the only LF Data Lake Admin
 
@@ -219,7 +219,7 @@ These should be the bullet points of a future `redshift-serverless-iceberg-coldp
 13. **The bucket-nested catalog ARN is** `arn:aws:glue:<region>:<account>:catalog/s3tablescatalog/<bucket-name>`. Database name is the namespace alone.
 14. **For Redshift auto-mount of S3 Tables**, the bucket integration must be in **Lake Formation access control mode**, not IAM mode. Set `AllowFullTableExternalDataAccess=False` and `CreateDatabaseDefaultPermissions=[]` (no IAM_ALLOWED_PRINCIPALS) when creating the catalog.
 15. **Three-part naming for S3 Tables** is `"<bucket>@s3tablescatalog".<namespace>.<table>` - note the `@` separator and the double quotes.
-16. **`ada credentials update` writes to a non-default profile** - use `AWS_PROFILE=...` to switch.
+16. **Custom credential helpers write to non-default profiles** - export `AWS_PROFILE` to point the scripts at the right identity, or `aws sts get-caller-identity` returns the wrong account silently.
 17. **LF `GrantPermissions` requires the caller to be a Data Lake Administrator**, not just an IAM admin. Add yourself via `put-data-lake-settings` first.
 
 ## Time totals
@@ -356,8 +356,10 @@ should lead with:
    on the bucket integration.
 7. **Three-part naming** is `"<bucket>@s3tablescatalog".<ns>.<table>`,
    not `awsdatacatalog.<...>.<ns>.<table>`.
-8. **`ada credentials update`** writes to a non-default profile - use
-   `AWS_PROFILE=...`.
+8. **Custom credential helpers write to non-default profiles** - many
+   credential-refresh tools (AWS SSO, internal brokers) land tokens
+   under a named profile, not the default. Export `AWS_PROFILE` or the
+   scripts pick up the wrong identity silently.
 9. **LF GrantPermissions requires Data Lake Admin** - add the default
    identity via `put-data-lake-settings` (preserve existing admins).
 10. **Firehose direct Kinesis -> Iceberg maps top-level JSON keys to
@@ -510,12 +512,12 @@ real data:
 
 - ~30 min: design + first-pass CFN + script + bootstrap/teardown
   wiring + this log.
-- ~25 min: 3-reviewer panel (code-review skill, AutoCR-style fidelity,
-  EdgeSwarm swarm-code-reviewer) found 8 must-fix items including the
-  cutoff-drift bug, the SecretArn missing-suffix bug (state machine
-  would have failed every execution at SubmitSafetyCheck), an abort
-  path that hid signal, and a doc-comment that lied about retry
-  bounds. Apply + re-validate.
+- ~25 min: a 3-reviewer pass (general code review, doc-vs-code
+  fidelity check, security-focused review) found 8 must-fix items
+  including the cutoff-drift bug, the SecretArn missing-suffix bug
+  (state machine would have failed every execution at SubmitSafetyCheck),
+  an abort path that hid signal, and a doc-comment that lied about
+  retry bounds. Apply + re-validate.
 
 **Total: ~55 min**, with the second half spent on review-driven
 correctness fixes the first pass missed. Worth recording: the cutoff
@@ -601,10 +603,10 @@ What's NOT yet validated:
 
 ### Soak monitoring (paste-ready when you come back in N days)
 
-Schedule was flipped to `ENABLED` at 2026-06-08 23:23 PT, so the first
-auto-prune fires roughly 24h later (~23:23 UTC daily). gujain@amazon.com
-is subscribed to the SNS alert topic (pending click-to-confirm); failures
-or aborts will email there.
+After flipping the schedule to `ENABLED`, the first auto-prune fires
+roughly 24h later (matching the `rate(1 day)` schedule expression). An
+email subscribes to the SNS alert topic via `aws sns subscribe`;
+failures or aborts surface in that inbox.
 
 **Signal 1 - every scheduled prune completed SUCCEEDED:**
 
