@@ -1,0 +1,612 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >
+  Part 2 hot/cold tiering: scheduled prune of the hot cdc_events table
+  on Redshift, gated on the cold-side Iceberg archive having received
+  rows for the same window. Step Functions orchestrates the safety
+  check, DELETE, VACUUM, and ANALYZE; EventBridge Scheduler drives it.
+  Imports the workgroup from the base stack; the script that deploys
+  this stack resolves the admin secret's full ARN (including its
+  Secrets-Manager-appended random suffix) and passes it as a parameter
+  here.
+
+Parameters:
+  ProjectName:
+    Type: String
+    Default: dsql-cdc
+    Description: Must match the base stack's ProjectName.
+    AllowedPattern: "^[a-z][a-z0-9-]{2,30}$"
+
+  RedshiftAdminSecretArn:
+    Type: String
+    Description: >
+      Full ARN of the Redshift admin secret, including the 6-char random
+      suffix Secrets Manager appends. The base stack only exports the
+      secret name, not the resolved ARN - 08-deploy-tiering.sh resolves
+      it via `aws secretsmanager describe-secret` and passes it here.
+      Required because Step Functions' executeStatement integration
+      validates SecretArn strictly (no wildcard partial match).
+    AllowedPattern: "^arn:aws[a-zA-Z-]*:secretsmanager:[a-z0-9-]+:[0-9]+:secret:.+-[A-Za-z0-9]{6}$"
+
+  RetentionHours:
+    Type: Number
+    Default: 24
+    Description: >
+      Hot retention horizon. Rows in cdc_events older than NOW() minus
+      this many hours are eligible for delete. 24 matches the unified
+      view's hot/cold split for the demo. Production typically uses
+      720 (30 days). The cutoff is resolved once at the START of each
+      Step Functions execution and pinned for that run, so SafetyCheck
+      and DELETE see the same window even if the execution takes
+      multiple minutes (e.g. long VACUUM).
+    MinValue: 1
+    MaxValue: 8760
+
+  ScheduleExpression:
+    Type: String
+    Default: "rate(1 day)"
+    Description: >
+      How often the prune runs. EventBridge Scheduler accepts both
+      rate(...) and cron(...). Demo: daily for fast feedback. Production:
+      typically cron(0 6 1 * ? *) for monthly at 06:00 UTC on the 1st.
+    AllowedPattern: "^(rate|cron)\\(.+\\)$"
+
+  ScheduleEnabled:
+    Type: String
+    Default: "DISABLED"
+    Description: >
+      Whether the Scheduler entry is active on deploy. Default DISABLED
+      so the first prune is human-triggered (StartExecution against the
+      state machine ARN), letting you verify the safety check works
+      before letting it run on a clock.
+    AllowedValues: ["ENABLED", "DISABLED"]
+
+  ExecutionTimeoutSeconds:
+    Type: Number
+    Default: 3600
+    Description: >
+      Hard upper bound on a single state machine execution. Beyond this,
+      SFN aborts the execution and the Catch routes to FailWithAlarm.
+      Default 1h is enough for VACUUM on demo-scale data; raise to
+      14400 (4h) if RetentionHours is set to 720 (30d) and the table
+      is large.
+    MinValue: 300
+    MaxValue: 43200
+
+  PollMaxAttempts:
+    Type: Number
+    Default: 720
+    Description: >
+      Per-step poll-loop maximum (Wait -> Describe cycles). At 5s
+      average wait, 720 = ~1h ceiling per step before that step gives
+      up and routes to FailWithAlarm. The state-machine-level
+      ExecutionTimeoutSeconds is the real backstop; this just keeps
+      the failure cause attributable to a specific step.
+    MinValue: 60
+    MaxValue: 4320
+
+  AlertEmail:
+    Type: String
+    Default: ""
+    Description: >
+      Optional email subscribed to the abort/failure SNS topic. Leave
+      blank to skip subscription (you can subscribe later via the
+      console). The topic itself is always created.
+    AllowedPattern: "^$|^[^@]+@[^@]+\\.[^@]+$"
+
+Conditions:
+  HasAlertEmail: !Not [!Equals [!Ref AlertEmail, ""]]
+
+Resources:
+  # =========================================================================
+  # SNS topic for abort + failure notifications.
+  # =========================================================================
+  AlertTopic:
+    Type: AWS::SNS::Topic
+    Properties:
+      TopicName: !Sub "${ProjectName}-tiering-alerts"
+      DisplayName: !Sub "${ProjectName} tiering alerts"
+
+  AlertSubscription:
+    Type: AWS::SNS::Subscription
+    Condition: HasAlertEmail
+    Properties:
+      TopicArn: !Ref AlertTopic
+      Protocol: email
+      Endpoint: !Ref AlertEmail
+
+  # =========================================================================
+  # Step Functions execution role
+  # The state machine itself only calls redshift-data and sns. Everything
+  # against actual data goes through the Redshift Data API, which gates
+  # on the admin secret. No direct IAM-to-Redshift permissions needed.
+  # =========================================================================
+  StateMachineRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "${ProjectName}-tiering-sfn-role"
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: states.amazonaws.com
+            Action: sts:AssumeRole
+            Condition:
+              # Defense in depth: only the local account's SFN service
+              # can assume this role. Cheap; pairs with the Scheduler
+              # role's same condition.
+              StringEquals:
+                aws:SourceAccount: !Ref AWS::AccountId
+      Policies:
+        - PolicyName: RedshiftDataAPI
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              # Redshift Data API actions don't support resource-level
+              # permissions - Resource: "*" is the only valid value. The
+              # secret-arn passed at runtime is the real authn boundary.
+              - Effect: Allow
+                Action:
+                  - redshift-data:ExecuteStatement
+                  - redshift-data:DescribeStatement
+                  - redshift-data:GetStatementResult
+                  - redshift-data:CancelStatement
+                Resource: "*"
+              - Effect: Allow
+                Action:
+                  - secretsmanager:GetSecretValue
+                Resource: !Ref RedshiftAdminSecretArn
+        - PolicyName: PublishAlerts
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action: sns:Publish
+                Resource: !Ref AlertTopic
+        - PolicyName: CloudWatchLogs
+          PolicyDocument:
+            Version: "2012-10-17"
+            # Step Functions writes execution logs through CloudWatch
+            # Logs vending policy. Cannot scope to a specific log group
+            # at the IAM layer - SFN creates per-execution streams under
+            # /aws/vendedlogs/states/. Resource: "*" is the documented
+            # form for this integration.
+            Statement:
+              - Effect: Allow
+                Action:
+                  - logs:CreateLogDelivery
+                  - logs:GetLogDelivery
+                  - logs:UpdateLogDelivery
+                  - logs:DeleteLogDelivery
+                  - logs:ListLogDeliveries
+                  - logs:PutResourcePolicy
+                  - logs:DescribeResourcePolicies
+                  - logs:DescribeLogGroups
+                Resource: "*"
+
+  StateMachineLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub "/aws/vendedlogs/states/${ProjectName}-tiering"
+      RetentionInDays: 14
+
+  # =========================================================================
+  # Step Functions state machine
+  #
+  # Phase order:
+  #   1. ResolveCutoff: SELECT cutoff timestamp once. Pinned in result
+  #      and passed verbatim to subsequent SQL so SafetyCheck and DELETE
+  #      see the identical window even if the execution takes minutes.
+  #   2. SubmitSafetyCheck: SELECT COUNT(*) FROM cold.cdc_events_archive
+  #                         WHERE commit_timestamp < cutoff
+  #   3. SafetyChoice: if 0 -> AbortNoArchive (publishes SNS, ends in Fail
+  #                              so executions show as FAILED in console)
+  #                    if >0 -> SubmitDelete
+  #   4. SubmitDelete: DELETE FROM cdc_events WHERE commit_timestamp < cutoff
+  #   5. SubmitVacuum: VACUUM DELETE ONLY cdc_events
+  #   6. SubmitAnalyze: ANALYZE cdc_events
+  #
+  # Each Redshift call uses a Submit + (Wait -> Describe -> Choice) subloop
+  # because the Data API is async (ExecuteStatement returns immediately;
+  # DescribeStatement reports terminal state). The Choice loops back via
+  # an iteration counter (PollAttempt) bounded by PollMaxAttempts; if the
+  # counter is exceeded the step routes to FailWithAlarm so the failure
+  # cause is attributable to a specific step. State-machine-level
+  # ExecutionTimeoutSeconds is the absolute backstop.
+  # =========================================================================
+  PruneStateMachine:
+    Type: AWS::StepFunctions::StateMachine
+    Properties:
+      StateMachineName: !Sub "${ProjectName}-tiering-prune"
+      RoleArn: !GetAtt StateMachineRole.Arn
+      LoggingConfiguration:
+        Level: ALL
+        IncludeExecutionData: true
+        Destinations:
+          - CloudWatchLogsLogGroup:
+              LogGroupArn: !GetAtt StateMachineLogGroup.Arn
+      DefinitionSubstitutions:
+        WorkgroupName:
+          Fn::ImportValue: !Sub "${ProjectName}-redshift-workgroup"
+        Database:
+          Fn::ImportValue: !Sub "${ProjectName}-redshift-database"
+        SecretArn: !Ref RedshiftAdminSecretArn
+        RetentionHours: !Ref RetentionHours
+        AlertTopicArn: !Ref AlertTopic
+        PollMaxAttempts: !Ref PollMaxAttempts
+        ExecutionTimeoutSeconds: !Ref ExecutionTimeoutSeconds
+      DefinitionString: |-
+        {
+          "Comment": "Prune cdc_events older than retention horizon, gated on cold-side archive having flushed. Cutoff is pinned at execution start so SafetyCheck and DELETE see the identical window.",
+          "TimeoutSeconds": ${ExecutionTimeoutSeconds},
+          "StartAt": "InitResolveCutoffPoll",
+          "States": {
+            "InitResolveCutoffPoll": {
+              "Type": "Pass",
+              "Parameters": {"attempts": 0},
+              "ResultPath": "$.resolveCutoffPoll",
+              "Next": "SubmitResolveCutoff"
+            },
+            "SubmitResolveCutoff": {
+              "Type": "Task",
+              "Resource": "arn:aws:states:::aws-sdk:redshiftdata:executeStatement",
+              "Parameters": {
+                "WorkgroupName": "${WorkgroupName}",
+                "Database": "${Database}",
+                "SecretArn": "${SecretArn}",
+                "Sql": "SELECT TO_CHAR(DATEADD(hour, -${RetentionHours}, GETDATE()), 'YYYY-MM-DD HH24:MI:SS') AS cutoff"
+              },
+              "ResultPath": "$.resolveCutoff",
+              "Next": "WaitResolveCutoff",
+              "Catch": [{"ErrorEquals": ["States.ALL"], "Next": "FailWithAlarm"}]
+            },
+            "WaitResolveCutoff": {"Type": "Wait", "Seconds": 1, "Next": "DescribeResolveCutoff"},
+            "DescribeResolveCutoff": {
+              "Type": "Task",
+              "Resource": "arn:aws:states:::aws-sdk:redshiftdata:describeStatement",
+              "Parameters": {"Id.$": "$.resolveCutoff.Id"},
+              "ResultPath": "$.resolveCutoffStatus",
+              "Next": "ResolveCutoffDone",
+              "Catch": [{"ErrorEquals": ["States.ALL"], "Next": "FailWithAlarm"}]
+            },
+            "ResolveCutoffDone": {
+              "Type": "Choice",
+              "Choices": [
+                {"Variable": "$.resolveCutoffStatus.Status", "StringEquals": "FINISHED", "Next": "ReadCutoff"},
+                {"Variable": "$.resolveCutoffStatus.Status", "StringEquals": "FAILED", "Next": "FailWithAlarm"},
+                {"Variable": "$.resolveCutoffStatus.Status", "StringEquals": "ABORTED", "Next": "FailWithAlarm"},
+                {"Variable": "$.resolveCutoffPoll.attempts", "NumericGreaterThanEquals": ${PollMaxAttempts}, "Next": "FailWithAlarm"}
+              ],
+              "Default": "IncrementResolveCutoffPoll"
+            },
+            "IncrementResolveCutoffPoll": {
+              "Type": "Pass",
+              "Parameters": {"attempts.$": "States.MathAdd($.resolveCutoffPoll.attempts, 1)"},
+              "ResultPath": "$.resolveCutoffPoll",
+              "Next": "WaitResolveCutoff"
+            },
+            "ReadCutoff": {
+              "Type": "Task",
+              "Resource": "arn:aws:states:::aws-sdk:redshiftdata:getStatementResult",
+              "Parameters": {"Id.$": "$.resolveCutoff.Id"},
+              "ResultPath": "$.cutoffResult",
+              "Next": "PinCutoff",
+              "Catch": [{"ErrorEquals": ["States.ALL"], "Next": "FailWithAlarm"}]
+            },
+            "PinCutoff": {
+              "Type": "Pass",
+              "Parameters": {"value.$": "$.cutoffResult.Records[0][0].StringValue"},
+              "ResultPath": "$.cutoff",
+              "Next": "InitSafetyCheckPoll"
+            },
+            "InitSafetyCheckPoll": {
+              "Type": "Pass",
+              "Parameters": {"attempts": 0},
+              "ResultPath": "$.safetyCheckPoll",
+              "Next": "SubmitSafetyCheck"
+            },
+            "SubmitSafetyCheck": {
+              "Type": "Task",
+              "Resource": "arn:aws:states:::aws-sdk:redshiftdata:executeStatement",
+              "Parameters": {
+                "WorkgroupName": "${WorkgroupName}",
+                "Database": "${Database}",
+                "SecretArn": "${SecretArn}",
+                "Sql.$": "States.Format('SELECT COUNT(*)::BIGINT AS n FROM cold.cdc_events_archive WHERE commit_timestamp < TIMESTAMP \\'{}\\'', $.cutoff.value)"
+              },
+              "ResultPath": "$.safetyCheck",
+              "Next": "WaitSafetyCheck",
+              "Catch": [{"ErrorEquals": ["States.ALL"], "Next": "FailWithAlarm"}]
+            },
+            "WaitSafetyCheck": {"Type": "Wait", "Seconds": 3, "Next": "DescribeSafetyCheck"},
+            "DescribeSafetyCheck": {
+              "Type": "Task",
+              "Resource": "arn:aws:states:::aws-sdk:redshiftdata:describeStatement",
+              "Parameters": {"Id.$": "$.safetyCheck.Id"},
+              "ResultPath": "$.safetyCheckStatus",
+              "Next": "SafetyCheckDone",
+              "Catch": [{"ErrorEquals": ["States.ALL"], "Next": "FailWithAlarm"}]
+            },
+            "SafetyCheckDone": {
+              "Type": "Choice",
+              "Choices": [
+                {"Variable": "$.safetyCheckStatus.Status", "StringEquals": "FINISHED", "Next": "ReadSafetyResult"},
+                {"Variable": "$.safetyCheckStatus.Status", "StringEquals": "FAILED", "Next": "FailWithAlarm"},
+                {"Variable": "$.safetyCheckStatus.Status", "StringEquals": "ABORTED", "Next": "FailWithAlarm"},
+                {"Variable": "$.safetyCheckPoll.attempts", "NumericGreaterThanEquals": ${PollMaxAttempts}, "Next": "FailWithAlarm"}
+              ],
+              "Default": "IncrementSafetyCheckPoll"
+            },
+            "IncrementSafetyCheckPoll": {
+              "Type": "Pass",
+              "Parameters": {"attempts.$": "States.MathAdd($.safetyCheckPoll.attempts, 1)"},
+              "ResultPath": "$.safetyCheckPoll",
+              "Next": "WaitSafetyCheck"
+            },
+            "ReadSafetyResult": {
+              "Type": "Task",
+              "Resource": "arn:aws:states:::aws-sdk:redshiftdata:getStatementResult",
+              "Parameters": {"Id.$": "$.safetyCheck.Id"},
+              "ResultPath": "$.safetyResult",
+              "Next": "SafetyChoice",
+              "Catch": [{"ErrorEquals": ["States.ALL"], "Next": "FailWithAlarm"}]
+            },
+            "SafetyChoice": {
+              "Type": "Choice",
+              "Choices": [
+                {
+                  "Variable": "$.safetyResult.Records[0][0].LongValue",
+                  "NumericGreaterThan": 0,
+                  "Next": "InitDeletePoll"
+                }
+              ],
+              "Default": "AbortNoArchive"
+            },
+            "AbortNoArchive": {
+              "Type": "Task",
+              "Resource": "arn:aws:states:::sns:publish",
+              "Parameters": {
+                "TopicArn": "${AlertTopicArn}",
+                "Subject": "Tiering aborted: cold archive empty for window",
+                "Message.$": "States.Format('Aborted prune: cold.cdc_events_archive has 0 rows older than cutoff {}. Firehose may be lagging or stalled. Investigate before re-running. Execution: {}', $.cutoff.value, $$.Execution.Name)"
+              },
+              "Next": "AbortFail"
+            },
+            "AbortFail": {
+              "Type": "Fail",
+              "Error": "AbortNoArchive",
+              "Cause": "Cold archive empty for the prune window. SNS published; check email and Firehose flush metrics."
+            },
+            "InitDeletePoll": {
+              "Type": "Pass",
+              "Parameters": {"attempts": 0},
+              "ResultPath": "$.deletePoll",
+              "Next": "SubmitDelete"
+            },
+            "SubmitDelete": {
+              "Type": "Task",
+              "Resource": "arn:aws:states:::aws-sdk:redshiftdata:executeStatement",
+              "Parameters": {
+                "WorkgroupName": "${WorkgroupName}",
+                "Database": "${Database}",
+                "SecretArn": "${SecretArn}",
+                "Sql.$": "States.Format('DELETE FROM cdc_events WHERE commit_timestamp < TIMESTAMP \\'{}\\'', $.cutoff.value)"
+              },
+              "ResultPath": "$.delete",
+              "Next": "WaitDelete",
+              "Catch": [{"ErrorEquals": ["States.ALL"], "Next": "FailWithAlarm"}]
+            },
+            "WaitDelete": {"Type": "Wait", "Seconds": 5, "Next": "DescribeDelete"},
+            "DescribeDelete": {
+              "Type": "Task",
+              "Resource": "arn:aws:states:::aws-sdk:redshiftdata:describeStatement",
+              "Parameters": {"Id.$": "$.delete.Id"},
+              "ResultPath": "$.deleteStatus",
+              "Next": "DeleteDone",
+              "Catch": [{"ErrorEquals": ["States.ALL"], "Next": "FailWithAlarm"}]
+            },
+            "DeleteDone": {
+              "Type": "Choice",
+              "Choices": [
+                {"Variable": "$.deleteStatus.Status", "StringEquals": "FINISHED", "Next": "InitVacuumPoll"},
+                {"Variable": "$.deleteStatus.Status", "StringEquals": "FAILED", "Next": "FailWithAlarm"},
+                {"Variable": "$.deleteStatus.Status", "StringEquals": "ABORTED", "Next": "FailWithAlarm"},
+                {"Variable": "$.deletePoll.attempts", "NumericGreaterThanEquals": ${PollMaxAttempts}, "Next": "FailWithAlarm"}
+              ],
+              "Default": "IncrementDeletePoll"
+            },
+            "IncrementDeletePoll": {
+              "Type": "Pass",
+              "Parameters": {"attempts.$": "States.MathAdd($.deletePoll.attempts, 1)"},
+              "ResultPath": "$.deletePoll",
+              "Next": "WaitDelete"
+            },
+            "InitVacuumPoll": {
+              "Type": "Pass",
+              "Parameters": {"attempts": 0},
+              "ResultPath": "$.vacuumPoll",
+              "Next": "SubmitVacuum"
+            },
+            "SubmitVacuum": {
+              "Type": "Task",
+              "Resource": "arn:aws:states:::aws-sdk:redshiftdata:executeStatement",
+              "Parameters": {
+                "WorkgroupName": "${WorkgroupName}",
+                "Database": "${Database}",
+                "SecretArn": "${SecretArn}",
+                "Sql": "VACUUM DELETE ONLY cdc_events"
+              },
+              "ResultPath": "$.vacuum",
+              "Next": "WaitVacuum",
+              "Catch": [{"ErrorEquals": ["States.ALL"], "Next": "FailWithAlarm"}]
+            },
+            "WaitVacuum": {"Type": "Wait", "Seconds": 10, "Next": "DescribeVacuum"},
+            "DescribeVacuum": {
+              "Type": "Task",
+              "Resource": "arn:aws:states:::aws-sdk:redshiftdata:describeStatement",
+              "Parameters": {"Id.$": "$.vacuum.Id"},
+              "ResultPath": "$.vacuumStatus",
+              "Next": "VacuumDone",
+              "Catch": [{"ErrorEquals": ["States.ALL"], "Next": "FailWithAlarm"}]
+            },
+            "VacuumDone": {
+              "Type": "Choice",
+              "Choices": [
+                {"Variable": "$.vacuumStatus.Status", "StringEquals": "FINISHED", "Next": "InitAnalyzePoll"},
+                {"Variable": "$.vacuumStatus.Status", "StringEquals": "FAILED", "Next": "FailWithAlarm"},
+                {"Variable": "$.vacuumStatus.Status", "StringEquals": "ABORTED", "Next": "FailWithAlarm"},
+                {"Variable": "$.vacuumPoll.attempts", "NumericGreaterThanEquals": ${PollMaxAttempts}, "Next": "FailWithAlarm"}
+              ],
+              "Default": "IncrementVacuumPoll"
+            },
+            "IncrementVacuumPoll": {
+              "Type": "Pass",
+              "Parameters": {"attempts.$": "States.MathAdd($.vacuumPoll.attempts, 1)"},
+              "ResultPath": "$.vacuumPoll",
+              "Next": "WaitVacuum"
+            },
+            "InitAnalyzePoll": {
+              "Type": "Pass",
+              "Parameters": {"attempts": 0},
+              "ResultPath": "$.analyzePoll",
+              "Next": "SubmitAnalyze"
+            },
+            "SubmitAnalyze": {
+              "Type": "Task",
+              "Resource": "arn:aws:states:::aws-sdk:redshiftdata:executeStatement",
+              "Parameters": {
+                "WorkgroupName": "${WorkgroupName}",
+                "Database": "${Database}",
+                "SecretArn": "${SecretArn}",
+                "Sql": "ANALYZE cdc_events"
+              },
+              "ResultPath": "$.analyze",
+              "Next": "WaitAnalyze",
+              "Catch": [{"ErrorEquals": ["States.ALL"], "Next": "FailWithAlarm"}]
+            },
+            "WaitAnalyze": {"Type": "Wait", "Seconds": 5, "Next": "DescribeAnalyze"},
+            "DescribeAnalyze": {
+              "Type": "Task",
+              "Resource": "arn:aws:states:::aws-sdk:redshiftdata:describeStatement",
+              "Parameters": {"Id.$": "$.analyze.Id"},
+              "ResultPath": "$.analyzeStatus",
+              "Next": "AnalyzeDone",
+              "Catch": [{"ErrorEquals": ["States.ALL"], "Next": "FailWithAlarm"}]
+            },
+            "AnalyzeDone": {
+              "Type": "Choice",
+              "Choices": [
+                {"Variable": "$.analyzeStatus.Status", "StringEquals": "FINISHED", "Next": "Success"},
+                {"Variable": "$.analyzeStatus.Status", "StringEquals": "FAILED", "Next": "FailWithAlarm"},
+                {"Variable": "$.analyzeStatus.Status", "StringEquals": "ABORTED", "Next": "FailWithAlarm"},
+                {"Variable": "$.analyzePoll.attempts", "NumericGreaterThanEquals": ${PollMaxAttempts}, "Next": "FailWithAlarm"}
+              ],
+              "Default": "IncrementAnalyzePoll"
+            },
+            "IncrementAnalyzePoll": {
+              "Type": "Pass",
+              "Parameters": {"attempts.$": "States.MathAdd($.analyzePoll.attempts, 1)"},
+              "ResultPath": "$.analyzePoll",
+              "Next": "WaitAnalyze"
+            },
+            "Success": {"Type": "Succeed"},
+            "FailWithAlarm": {
+              "Type": "Task",
+              "Resource": "arn:aws:states:::sns:publish",
+              "Parameters": {
+                "TopicArn": "${AlertTopicArn}",
+                "Subject": "Tiering prune failed",
+                "Message.$": "States.Format('Tiering prune failed. Execution: {}. Inspect Step Functions execution history for the failing state.', $$.Execution.Name)"
+              },
+              "Next": "Fail"
+            },
+            "Fail": {
+              "Type": "Fail",
+              "Error": "PruneFailed",
+              "Cause": "See SNS alert and Step Functions execution history."
+            }
+          }
+        }
+
+  # =========================================================================
+  # EventBridge Scheduler entry that drives the state machine.
+  # Default DISABLED so the operator can trigger one execution manually
+  # first (StartExecution) before letting the clock fire it.
+  # =========================================================================
+  SchedulerRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "${ProjectName}-tiering-scheduler-role"
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: scheduler.amazonaws.com
+            Action: sts:AssumeRole
+            Condition:
+              StringEquals:
+                aws:SourceAccount: !Ref AWS::AccountId
+      Policies:
+        - PolicyName: InvokeStateMachine
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action: states:StartExecution
+                Resource: !GetAtt PruneStateMachine.Arn
+
+  PruneSchedule:
+    Type: AWS::Scheduler::Schedule
+    Properties:
+      Name: !Sub "${ProjectName}-tiering-schedule"
+      Description: !Sub "Prune ${ProjectName} cdc_events older than ${RetentionHours}h on ${ScheduleExpression}."
+      ScheduleExpression: !Ref ScheduleExpression
+      ScheduleExpressionTimezone: UTC
+      State: !Ref ScheduleEnabled
+      FlexibleTimeWindow:
+        Mode: "OFF"
+      Target:
+        Arn: !GetAtt PruneStateMachine.Arn
+        RoleArn: !GetAtt SchedulerRole.Arn
+        # Empty input - the state machine doesn't need any per-invocation
+        # parameters. Retention horizon is baked into the definition.
+        Input: "{}"
+        RetryPolicy:
+          # Up to 3 retries over a max age of 6 hours. Beyond that, the
+          # scheduler gives up on the missed window - the next scheduled
+          # run will pick up the larger backlog (DELETE is set-based, so
+          # extra rows only matter for VACUUM duration).
+          MaximumRetryAttempts: 3
+          MaximumEventAgeInSeconds: 21600
+
+Outputs:
+  StateMachineArn:
+    Description: ARN of the prune state machine. Use with `aws stepfunctions start-execution` for manual one-shot tests.
+    Value: !Ref PruneStateMachine
+    Export:
+      Name: !Sub "${ProjectName}-tiering-state-machine-arn"
+
+  StateMachineName:
+    Description: Convenience name for CLI commands.
+    Value: !GetAtt PruneStateMachine.Name
+    Export:
+      Name: !Sub "${ProjectName}-tiering-state-machine-name"
+
+  ScheduleName:
+    Description: EventBridge Scheduler entry name. Re-run 08-deploy-tiering.sh with TIERING_SCHEDULE_STATE=ENABLED to flip on, rather than aws scheduler update-schedule (which is full-replace and would lose Input/RetryPolicy/timezone).
+    Value: !Ref PruneSchedule
+    Export:
+      Name: !Sub "${ProjectName}-tiering-schedule-name"
+
+  AlertTopicArn:
+    Description: SNS topic for abort/failure alerts. Subscribe by hand if AlertEmail wasn't set at deploy time.
+    Value: !Ref AlertTopic
+    Export:
+      Name: !Sub "${ProjectName}-tiering-alert-topic-arn"
+
+  ManualTestCommand:
+    Description: Copy-paste command to run a one-shot prune. Watch the result in the Step Functions console.
+    Value: !Sub
+      - "aws stepfunctions start-execution --state-machine-arn ${SmArn} --region ${AWS::Region}"
+      - SmArn: !GetAtt PruneStateMachine.Arn

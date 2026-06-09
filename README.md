@@ -1,4 +1,4 @@
-# DSQL → Redshift CDC Pipeline
+# DSQL -> Redshift CDC Pipeline
 
 [![CI](https://github.com/jaingxyz/dsql-redshift-cdc-pipeline/actions/workflows/ci.yml/badge.svg)](https://github.com/jaingxyz/dsql-redshift-cdc-pipeline/actions/workflows/ci.yml)
 [![CodeQL](https://github.com/jaingxyz/dsql-redshift-cdc-pipeline/actions/workflows/codeql.yml/badge.svg)](https://github.com/jaingxyz/dsql-redshift-cdc-pipeline/actions/workflows/codeql.yml)
@@ -7,11 +7,11 @@
 
 A fully serverless reference pipeline that streams Change Data Capture (CDC)
 events from **Amazon Aurora DSQL** through **Amazon Kinesis Data Streams** and
-**AWS Lambda** into **Amazon Redshift Serverless** — with infrastructure-as-code,
+**AWS Lambda** into **Amazon Redshift Serverless** - with infrastructure-as-code,
 a realistic e-commerce sample app to drive it, and analytical queries that
 showcase the use cases.
 
-> 📖 **Companion blog post:** *Zero-ETL DSQL → Redshift, Almost.*
+> 📖 **Companion blog post:** *Zero-ETL DSQL -> Redshift, Almost.*
 > Read it on [Substack](https://gauravjx.substack.com/p/zero-etl-dsql-to-redshift-almost)
 > or [AWS Builder Center](https://builder.aws.com/content/39S4beDMSbn6piEwUXKUxyNpjkM/zero-etl-dsql-to-redshift-almost).
 
@@ -54,6 +54,8 @@ near-zero, active cost scales linearly with traffic.
 │   ├── cloudformation.yaml         # DSQL cluster, Kinesis, IAM, Redshift, Lambda, event source
 │   ├── cloudformation-simulator.yaml   # Optional: always-on Fargate order simulator
 │   ├── cloudformation-sagemaker.yaml   # Optional: SageMaker exec role + Redshift access
+│   ├── cloudformation-iceberg.yaml     # Optional: Firehose -> S3 Tables Iceberg cold path
+│   ├── cloudformation-tiering.yaml     # Optional: Step Functions prune of cdc_events older than 24h
 │   ├── scripts/
 │   │   ├── bootstrap.sh         # One-shot orchestrator
 │   │   ├── 01-deploy-cfn.sh
@@ -61,6 +63,9 @@ near-zero, active cost scales linearly with traffic.
 │   │   ├── 03-load-schemas.sh
 │   │   ├── 04-deploy-lambda-code.sh
 │   │   ├── 05-deploy-simulator.sh
+│   │   ├── 06-deploy-sagemaker.sh
+│   │   ├── 07-deploy-iceberg.sh
+│   │   ├── 08-deploy-tiering.sh
 │   │   ├── teardown.sh
 │   │   └── _lib.sh              # Shared helpers
 │   └── README.md                # Detailed infrastructure docs
@@ -68,7 +73,7 @@ near-zero, active cost scales linearly with traffic.
 │   ├── dsql_schema.sql          # Source schema (customers, products, orders, order_items)
 │   └── redshift_schema.sql      # Append-only event log + current-state views
 ├── app/
-│   ├── cdc_processor.py         # Lambda: Kinesis → parameterized inserts into Redshift
+│   ├── cdc_processor.py         # Lambda: Kinesis -> parameterized inserts into Redshift
 │   └── order_simulator.py       # Realistic order activity generator
 ├── analytics/
 │   └── sample_queries.sql       # 6 use-case queries
@@ -119,7 +124,7 @@ infra/scripts/05-deploy-simulator.sh
 This adds:
 
 - **ECR private repository** for the simulator container
-- **Minimal VPC** (2 public subnets, no NAT — saves ~$32/mo)
+- **Minimal VPC** (2 public subnets, no NAT - saves ~$32/mo)
 - **ECS Fargate service** running 1 task on Graviton arm64 (~$3/mo)
 - **AWS Budget** at the configured threshold (default $200/mo)
 
@@ -127,7 +132,7 @@ The simulator runs `order_simulator.py --duration 0 --rate 1` indefinitely,
 proactively reconnecting every 14 minutes (under the DSQL 15-min token cap)
 and using `sslmode=verify-full` per AWS guidance.
 
-**Cost (us-east-1, conservative)**: ~$80–200/mo dominated by Redshift
+**Cost (us-east-1, conservative)**: ~$80-200/mo dominated by Redshift
 Serverless RPU-hours when warm. Tear down with:
 
 ```bash
@@ -159,9 +164,9 @@ aws cloudformation deploy \
 This creates an IAM role (`dsql-cdc-sagemaker-exec-role`) with both
 auth paths into the workgroup:
 
-- **Secrets Manager** — read the auto-rotated admin password (the base
+- **Secrets Manager** - read the auto-rotated admin password (the base
   stack creates this via `ManageAdminPassword=true`)
-- **Short-lived federated creds** — `redshift-serverless:GetCredentials`
+- **Short-lived federated creds** - `redshift-serverless:GetCredentials`
   on the workgroup ARN
 
 …plus the `redshift-data:*` actions either path needs. Pass
@@ -187,7 +192,7 @@ secret. Idempotent: re-running tolerates "user already exists".
 
 **Connecting from a notebook.** Pick whichever auth fits. All three
 snippets assume the notebook's default boto3 session is running as the
-SageMaker exec role — verify with
+SageMaker exec role - verify with
 `boto3.client("sts").get_caller_identity()` before you wonder why
 permissions look wrong.
 
@@ -213,20 +218,20 @@ conn = redshift_connector.connect(
 import boto3
 rs = boto3.client("redshift-serverless")
 out = rs.get_credentials(workgroupName="dsql-cdc-wg", dbName="dev")
-# out["dbUser"] == "IAMR:dsql-cdc-sagemaker-exec-role" — only if the
+# out["dbUser"] == "IAMR:dsql-cdc-sagemaker-exec-role" - only if the
 # caller IS that role. Run boto3.client("sts").get_caller_identity()
 # to confirm. If it returns a different ARN, the GRANT above doesn't
 # apply to that user and queries will hit permission-denied.
 # Pass out["dbUser"] / out["dbPassword"] to your driver of choice.
 
-# Option C: Redshift Data API (no driver, no creds — uses the role implicitly)
+# Option C: Redshift Data API (no driver, no creds - uses the role implicitly)
 import boto3, time
 client = boto3.client("redshift-data")
 resp = client.execute_statement(
     WorkgroupName="dsql-cdc-wg", Database="dev",
     Sql="SELECT COUNT(*) FROM cdc_events",
 )
-# execute_statement is asynchronous — it returns a statement ID, not
+# execute_statement is asynchronous - it returns a statement ID, not
 # rows. Poll describe_statement until FINISHED, then fetch the result.
 qid = resp["Id"]
 while client.describe_statement(Id=qid)["Status"] not in ("FINISHED", "FAILED", "ABORTED"):
@@ -238,27 +243,27 @@ print(client.get_statement_result(Id=qid)["Records"])
 
 If you're using **SageMaker Unified Studio** (the 2024+ DataZone-backed
 console at `*.sagemaker.<region>.on.aws`), the Data tab does show
-Redshift connections — but only objects the **connecting DB user**
+Redshift connections - but only objects the **connecting DB user**
 has SELECT on. The setup that works:
 
-1. **Project → Data → Connections → Add → Amazon Redshift**.
+1. **Project -> Data -> Connections -> Add -> Amazon Redshift**.
 2. **Redshift compute** = JDBC URL of your workgroup, e.g.
    `jdbc:redshift://dsql-cdc-wg.<account>.<region>.redshift-serverless.amazonaws.com:5439/dev`.
-3. **JDBC URL Parameters**: `groupFederation=True` (Studio default —
+3. **JDBC URL Parameters**: `groupFederation=True` (Studio default -
    enables IAM federation against Redshift Serverless).
 4. **Authentication type = IAM**, leave **Access role ARN empty** to
    use the project's own IAM identity, OR paste
    `arn:aws:iam::<account>:role/dsql-cdc-sagemaker-exec-role` to use
    the role provisioned by `cloudformation-sagemaker.yaml`.
 5. **Save**, refresh the Catalogs tree (the ↻ icon), expand
-   `Connections → <conn-name> → dev → public`.
+   `Connections -> <conn-name> -> dev -> public`.
 
 You should see **`tables(1)`** (cdc_events) and **`views(4)`**
 (orders/customers/products/order_items_current). If you see
 `views(0)`, it's a **GRANTs gap**: the connecting DB user has SELECT
 on `cdc_events` (granted to PUBLIC by `schema/redshift_schema.sql`)
 but not on the views. The schema file now grants the views to PUBLIC
-too — re-run `infra/scripts/03-load-schemas.sh` if you bootstrapped
+too - re-run `infra/scripts/03-load-schemas.sh` if you bootstrapped
 before that change, or run as admin:
 
 ```sql
@@ -288,15 +293,15 @@ aws cloudformation delete-stack --stack-name dsql-cdc-sagemaker
 ## Sample analytical queries
 
 Once data is flowing, run any of the queries in
-[`analytics/sample_queries.sql`](analytics/sample_queries.sql) — they cover
+[`analytics/sample_queries.sql`](analytics/sample_queries.sql) - they cover
 six use cases that come up constantly in e-commerce analytics:
 
-- **Real-time sales dashboards** — orders per minute, top SKUs, conversion funnel
-- **Fraud detection signals** — high-value orders from new customers, order velocity bursts
-- **Inventory management** — surge detection vs baseline, low-stock alerts
-- **Cart abandonment recovery** — pending orders eligible for win-back campaigns
-- **Customer LTV by country** — gross revenue and average order value
-- **Pipeline health checks** — CDC propagation latency, event volume gaps
+- **Real-time sales dashboards** - orders per minute, top SKUs, conversion funnel
+- **Fraud detection signals** - high-value orders from new customers, order velocity bursts
+- **Inventory management** - surge detection vs baseline, low-stock alerts
+- **Cart abandonment recovery** - pending orders eligible for win-back campaigns
+- **Customer LTV by country** - gross revenue and average order value
+- **Pipeline health checks** - CDC propagation latency, event volume gaps
 
 ## Key design decisions
 
@@ -310,7 +315,7 @@ operation is `d` (delete tombstone).
 
 **Single `SUPER` column for all source tables.** `event_data SUPER` lets the
 same `cdc_events` table absorb every source table's payload. Adding a new
-source table in DSQL requires zero Lambda changes — only a new view downstream.
+source table in DSQL requires zero Lambda changes - only a new view downstream.
 
 **Parameterized SQL into Redshift.** The Lambda uses Redshift Data API named
 parameters, not string concatenation. Handles unusual values in source data
@@ -325,7 +330,7 @@ Aurora DSQL is generally available; **its CDC feature is in public preview**.
 During the preview, **both INSERT and UPDATE operations arrive as `op: "c"`**.
 The `*_current` views in this repo handle that transparently. When DSQL CDC
 reaches GA and introduces a separate `u` op type, the views continue to work
-without changes — the `WHERE operation <> 'd'` filter still keeps non-deletes.
+without changes - the `WHERE operation <> 'd'` filter still keeps non-deletes.
 
 ## Common pitfalls
 
@@ -345,7 +350,7 @@ AWS docs](https://docs.aws.amazon.com/aurora-dsql/latest/userguide/cdc-iam.html)
 a millisecond epoch (13 digits) as a parameter and the statement fails
 async with `out of range for type integer`. Wrap big numeric parameters in
 `CAST(:param AS BIGINT)`. Also use `/ 1000.0` (not `/ 1000`) when converting
-to seconds — integer division truncates milliseconds and you'll measure
+to seconds - integer division truncates milliseconds and you'll measure
 latency in 1-second buckets without realizing it. See the INSERT in
 [`app/cdc_processor.py`](app/cdc_processor.py).
 
@@ -354,14 +359,14 @@ per IAM principal.** When the Lambda role calls the Data API, Redshift
 auto-creates a brand-new DB user mapped to that role. That user has no
 permissions on tables you (the human admin) created when loading the
 schema. This sample uses `GRANT INSERT, SELECT ON cdc_events TO PUBLIC`
-for simplicity — see [`schema/redshift_schema.sql`](schema/redshift_schema.sql)
+for simplicity - see [`schema/redshift_schema.sql`](schema/redshift_schema.sql)
 for the comment on tightening this in production.
 
-**The Redshift Data API is asynchronous — Lambda must wait for FINISHED.**
+**The Redshift Data API is asynchronous - Lambda must wait for FINISHED.**
 `execute_statement` returns a `statement_id` immediately; the actual SQL
 runs later. A naive Lambda that returns success after submission will
 checkpoint Kinesis records past the shard while the statement silently
-fails — leaving the pipeline "green" with zero rows landing. The CDC
+fails - leaving the pipeline "green" with zero rows landing. The CDC
 processor here polls `describe_statement` until each chunk reaches
 `FINISHED` and raises on `FAILED`/`ABORTED` so the Kinesis event source
 mapping retries the batch. Tunable via the `STATEMENT_POLL_TIMEOUT_S`
@@ -379,7 +384,7 @@ The script here detects "No updates to perform" and skips the wait.
 AWS publishes purpose-built tooling that makes this kind of work dramatically
 faster. The recommended starting point is the
 **[Agent Toolkit for AWS](https://github.com/aws/agent-toolkit-for-aws)**
-(GA, May 2026) — a unified set of plugins that bundle the AWS MCP Server,
+(GA, May 2026) - a unified set of plugins that bundle the AWS MCP Server,
 agent skills, and project-level rules. For Claude Code:
 
 ```bash
@@ -406,7 +411,7 @@ to enable live DB ops, edit
 `~/.claude/plugins/cache/agent-plugins-for-aws/databases-on-aws/<version>/.mcp.json`
 and add `--cluster_endpoint`, `--region`, `--database_user` to the
 `aurora-dsql` server's args. The patch is overwritten on plugin
-update — re-apply after `claude plugin update databases-on-aws`.
+update - re-apply after `claude plugin update databases-on-aws`.
 
 For Redshift work, the AWS Labs **MCP server** in
 [`awslabs/mcp`](https://github.com/awslabs/mcp) has no plugin wrapper
@@ -423,13 +428,13 @@ SQL, async statement polling, append-only writes, etc.).
 
 ## License
 
-AGPL-3.0 — see [LICENSE](LICENSE). This is a reference / sample repository.
+AGPL-3.0 - see [LICENSE](LICENSE). This is a reference / sample repository.
 Not intended for direct production use; copy the *pattern*, not the code.
 
 Attributions: see [NOTICE](NOTICE).
 
 ## Contributing
 
-Issues and PRs welcome. This is a personal sample, not a production toolkit —
+Issues and PRs welcome. This is a personal sample, not a production toolkit -
 please don't open security-sensitive findings as public issues. Email the
 author directly.

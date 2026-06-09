@@ -6,7 +6,7 @@
 # Redshift, Lambda, and IAM roles) -> local env file.
 #
 # Add-on stacks are deleted BEFORE the base stack because the simulator
-# stack imports values via Fn::ImportValue from the base — CloudFormation
+# stack imports values via Fn::ImportValue from the base - CloudFormation
 # refuses to delete an export that's still in use by another stack.
 #
 # Safety: this script DELETES resources. It prompts before each destructive
@@ -53,8 +53,15 @@ delete_stack_if_exists() {
     fi
 }
 
-# 0. Optional add-on stacks first — they import from the base stack
-# and have to go before its exports can be removed.
+# 0. Optional add-on stacks first - they import from the base stack
+# and have to go before its exports can be removed. Tiering goes
+# BEFORE iceberg because the prune state machine queries
+# cold.cdc_events_archive; if EventBridge fires mid-teardown after
+# the iceberg stack is gone, the run would just abort safely (cold
+# table empty) - but deleting tiering first removes the schedule
+# entirely, which is cleaner.
+delete_stack_if_exists "${PROJECT_NAME}-tiering" "tiering automation"
+delete_stack_if_exists "${PROJECT_NAME}-iceberg" "Iceberg cold path"
 delete_stack_if_exists "${PROJECT_NAME}-sagemaker" "SageMaker access"
 delete_stack_if_exists "${PROJECT_NAME}-simulator" "always-on simulator"
 

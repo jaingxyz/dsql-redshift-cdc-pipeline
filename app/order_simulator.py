@@ -70,7 +70,7 @@ class SimulatorState:
 #   - any single connection lives at most 60 minutes
 #   - sslmode=verify-full is required to validate the server cert chain
 #
-# We mint a fresh token via boto3 on every (re)connect — no caching. The
+# We mint a fresh token via boto3 on every (re)connect - no caching. The
 # proactive-refresh window (CONN_REFRESH_S, default 14 min) is below the
 # 15-min token cap so we cycle the connection BEFORE it errors out
 # mid-statement. Reactive reconnect still exists in the outer loop in

@@ -39,3 +39,6 @@ infra/.env.bootstrap
 local/
 scratch/
 notes/
+
+# Claude Code project-local settings (per-developer permissions allowlist)
+.claude/

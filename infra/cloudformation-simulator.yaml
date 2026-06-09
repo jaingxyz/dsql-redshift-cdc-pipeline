@@ -111,7 +111,7 @@ Resources:
   # in this account (no long-lived secrets in GHA). Trust is scoped to
   # the configured repo + ref (main branch and PRs against main).
   #
-  # ClientIdList must be exactly "sts.amazonaws.com" — the audience GHA
+  # ClientIdList must be exactly "sts.amazonaws.com" - the audience GHA
   # tokens are issued for. ThumbprintList is GitHub's CA cert thumbprint;
   # AWS no longer validates it as of 2023 but the field is still required.
   # =========================================================================
@@ -179,7 +179,7 @@ Resources:
 
   # =========================================================================
   # Minimal VPC: 1 VPC, 2 public subnets across 2 AZs, IGW, public route.
-  # No private subnets, no NAT — see top-of-file rationale.
+  # No private subnets, no NAT - see top-of-file rationale.
   # =========================================================================
   Vpc:
     Type: AWS::EC2::VPC
@@ -268,7 +268,7 @@ Resources:
 
   # =========================================================================
   # ECS cluster (Fargate-only). Enable container insights for free metrics
-  # in CloudWatch — useful when you eventually wonder why a simulator task
+  # in CloudWatch - useful when you eventually wonder why a simulator task
   # restarted.
   # =========================================================================
   EcsCluster:
@@ -400,7 +400,7 @@ Resources:
 
   # =========================================================================
   # Cost guardrail: monthly budget. NotificationsWithSubscribers omitted
-  # per user choice — you'll watch the budget tab in the console manually.
+  # per user choice - you'll watch the budget tab in the console manually.
   # =========================================================================
   MonthlyBudget:
     Type: AWS::Budgets::Budget

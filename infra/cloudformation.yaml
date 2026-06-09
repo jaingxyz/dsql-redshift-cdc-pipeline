@@ -8,7 +8,7 @@ Description: >
   NOT created by this template (handled by scripts/ instead, since they
   require post-stack operations or use APIs not yet covered by CFN):
     * The DSQL CDC stream that links the cluster to the Kinesis stream
-      (scripts/02-create-cdc-stream.sh) — DSQL CDC is in public preview
+      (scripts/02-create-cdc-stream.sh) - DSQL CDC is in public preview
       and does not yet have a CloudFormation resource type
     * Source and target schemas (scripts/03-load-schemas.sh)
     * The real Lambda code (scripts/04-deploy-lambda-code.sh)
@@ -66,7 +66,7 @@ Resources:
   # =========================================================================
   # IAM role assumed by Aurora DSQL CDC service to write to Kinesis
   # Trust policy uses ArnLike against the stream ARN pattern under this
-  # cluster — least privilege, matching the AWS DSQL CDC docs:
+  # cluster - least privilege, matching the AWS DSQL CDC docs:
   # https://docs.aws.amazon.com/aurora-dsql/latest/userguide/cdc-iam.html
   # =========================================================================
   DsqlCdcKinesisRole:
@@ -107,7 +107,7 @@ Resources:
   # Data API with IAM auth.
   #
   # Note: no DeletionPolicy is set on these resources because this is a
-  # demo stack — teardown.sh is meant to remove everything. For production,
+  # demo stack - teardown.sh is meant to remove everything. For production,
   # add DeletionPolicy: Snapshot to RedshiftNamespace.
   # =========================================================================
   RedshiftNamespace:
@@ -199,7 +199,7 @@ Resources:
       Code:
         ZipFile: |
           # PLACEHOLDER. Real code is deployed by scripts/04-deploy-lambda-code.sh.
-          # Raise (not return) — if Kinesis ever invokes this placeholder,
+          # Raise (not return) - if Kinesis ever invokes this placeholder,
           # returning 200 would silently advance the iterator past CDC events
           # that never made it to Redshift. Raising forces the EventSourceMapping
           # to retry and surfaces the misconfiguration in CloudWatch.
@@ -285,7 +285,7 @@ Outputs:
     # The "redshift!<namespace>-admin" convention is set by
     # ManageAdminPassword=true. We reference RedshiftNamespace via !Ref
     # (returns NamespaceName) so renaming the namespace doesn't silently
-    # desync this export — the only assumption left is the convention.
+    # desync this export - the only assumption left is the convention.
     Description: Name of the Secrets Manager secret holding the admin password
     Value: !Sub "redshift!${RedshiftNamespace}-admin"
     Export:

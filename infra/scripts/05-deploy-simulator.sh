@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Deploy the simulator infrastructure (ECR + VPC + Fargate cluster + service +
-# Budget + GitHub OIDC role). The container IMAGE itself is NOT built here —
+# Budget + GitHub OIDC role). The container IMAGE itself is NOT built here -
 # that's done by .github/workflows/build-simulator.yml on push to main.
 #
 # Why split the build out? Building containers on a developer laptop creates
