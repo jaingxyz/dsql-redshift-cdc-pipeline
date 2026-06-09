@@ -57,18 +57,28 @@ Parameters:
     Type: String
     Default: "false"
     Description: >
-      Provision the Firehose delivery stream. Firehose validates the
-      destination Iceberg table exists at create time, but the table
-      itself can't be created until the namespace has propagated
-      (minutes). Two-phase deploy: pass "false" first (creates bucket
-      + namespace + IAM), the deploy script creates the table, then
-      pass "true" to add Firehose.
+      Provision Firehose-supporting resources (role, log group, error
+      bucket, transform Lambda + role + log group) but NOT the
+      delivery stream itself. Used in three-phase deploy because LF
+      grants need a real IAM principal to exist before they can be
+      applied, and the transform Lambda must exist (with placeholder
+      code) so 07-deploy-iceberg.sh can update-function-code into it
+      before Phase B wires the stream.
+    AllowedValues: ["true", "false"]
+
+  EnableFirehoseStream:
+    Type: String
+    Default: "false"
+    Description: >
+      Final phase: actually create the Firehose delivery stream.
+      Requires EnableFirehose=true and LF grants on the role.
     AllowedValues: ["true", "false"]
 
 Conditions:
   UseEnhancedFanOut: !Equals [!Ref EnhancedFanOut, "true"]
   HasBucketSuffix: !Not [!Equals [!Ref BucketSuffix, ""]]
   WantFirehose: !Equals [!Ref EnableFirehose, "true"]
+  WantFirehoseStream: !Equals [!Ref EnableFirehoseStream, "true"]
 
 Resources:
   # =========================================================================
@@ -115,10 +125,17 @@ Resources:
   # Permissions:
   #   - Kinesis: read the existing CDC stream
   #   - Glue: read/write through the s3tablescatalog federated catalog
-  #     (this is the path to S3 Tables — Firehose talks to Glue, not
-  #     S3 Tables directly)
+  #     (one of the two paths to S3 Tables — Firehose uses Glue's
+  #     federated API for catalog ops, AND S3 Tables direct API for
+  #     data writes)
+  #   - Lake Formation: GetDataAccess (required for any Glue federated
+  #     catalog op against an LF-managed catalog)
+  #   - S3 Tables: direct table I/O (the second path — Glue handles
+  #     metadata, S3 Tables handles parquet writes)
   #   - S3 (limited): error/backup bucket the Firehose maintains
   #   - Logs: deliver-stream log group
+  #   - Lambda: invoke + GetFunctionConfiguration on the transform
+  #     Lambda (Firehose calls it synchronously per buffered batch)
   # =========================================================================
   FirehoseRole:
     Type: AWS::IAM::Role
@@ -132,6 +149,11 @@ Resources:
             Principal:
               Service: firehose.amazonaws.com
             Action: sts:AssumeRole
+            # Defense in depth: only Firehose streams in this account
+            # can assume this role. Cheap, no downside.
+            Condition:
+              StringEquals:
+                aws:SourceAccount: !Ref AWS::AccountId
       Policies:
         - PolicyName: KinesisRead
           PolicyDocument:
@@ -162,16 +184,23 @@ Resources:
                   - glue:UpdateTable
                 Resource:
                   # The s3tablescatalog Glue catalog has 3 layers of
-                  # ARN: parent catalog, bucket-nested catalog, and
-                  # databases/tables under each. We allow all paths
-                  # the Firehose handler walks.
+                  # ARN forms for the federated s3tablescatalog,
+                  # per https://docs.aws.amazon.com/glue/latest/dg/s3tables-catalog-prerequisites.html:
+                  #   catalog                            — root
+                  #   catalog/s3tablescatalog            — federated parent
+                  #   catalog/s3tablescatalog/<bkt>      — bucket-nested
+                  #   database/s3tablescatalog/<bkt>/<db>     ← TWO wildcards
+                  #   table/s3tablescatalog/<bkt>/<db>/<tbl>  ← THREE wildcards
+                  # An earlier draft used database/s3tablescatalog/* and
+                  # table/s3tablescatalog/*/* (one wildcard short of the
+                  # documented form). Don't regress to those — the AWS
+                  # ARN authorizer only matches segment-by-segment, and
+                  # the single-wildcard forms match nothing real.
                   - !Sub "arn:aws:glue:${AWS::Region}:${AWS::AccountId}:catalog"
                   - !Sub "arn:aws:glue:${AWS::Region}:${AWS::AccountId}:catalog/s3tablescatalog"
                   - !Sub "arn:aws:glue:${AWS::Region}:${AWS::AccountId}:catalog/s3tablescatalog/*"
-                  - !Sub "arn:aws:glue:${AWS::Region}:${AWS::AccountId}:database/s3tablescatalog/*"
-                  - !Sub "arn:aws:glue:${AWS::Region}:${AWS::AccountId}:database/*/s3tablescatalog/*"
-                  - !Sub "arn:aws:glue:${AWS::Region}:${AWS::AccountId}:table/s3tablescatalog/*/*"
-                  - !Sub "arn:aws:glue:${AWS::Region}:${AWS::AccountId}:table/*/s3tablescatalog/*/*"
+                  - !Sub "arn:aws:glue:${AWS::Region}:${AWS::AccountId}:database/s3tablescatalog/*/*"
+                  - !Sub "arn:aws:glue:${AWS::Region}:${AWS::AccountId}:table/s3tablescatalog/*/*/*"
               # Lake Formation: required for Glue federated catalog
               # operations against S3 Tables.
               - Effect: Allow
@@ -217,6 +246,74 @@ Resources:
                   - logs:CreateLogStream
                   - logs:PutLogEvents
                 Resource: !GetAtt FirehoseLogGroup.Arn
+        - PolicyName: InvokeTransform
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              # Firehose invokes the transform Lambda synchronously per
+              # buffered batch to reshape DSQL CDC records into the
+              # Iceberg column layout before delivery.
+              - Effect: Allow
+                Action:
+                  - lambda:InvokeFunction
+                  - lambda:GetFunctionConfiguration
+                Resource: !GetAtt TransformLambda.Arn
+
+  # =========================================================================
+  # Firehose transform Lambda
+  # Firehose maps raw record top-level JSON keys to Iceberg columns by
+  # name. DSQL CDC records ({op, after, source, ts_ms}) share no keys
+  # with cdc_events_archive's columns, so without this reshaping step
+  # Firehose rejects every record (Iceberg.MissingColumnWithinRecord)
+  # into the error bucket. This function emits the column shape; real
+  # code is deployed by 07-deploy-iceberg.sh (placeholder below keeps
+  # the inline ZipFile under CFN's 4096-byte limit).
+  # =========================================================================
+  TransformLambdaRole:
+    Type: AWS::IAM::Role
+    Condition: WantFirehose
+    Properties:
+      RoleName: !Sub "${ProjectName}-iceberg-transform-role"
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+            Condition:
+              StringEquals:
+                aws:SourceAccount: !Ref AWS::AccountId
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+
+  TransformLambda:
+    Type: AWS::Lambda::Function
+    Condition: WantFirehose
+    Properties:
+      FunctionName: !Sub "${ProjectName}-iceberg-transform"
+      Runtime: python3.11
+      Handler: firehose_transform.lambda_handler
+      Role: !GetAtt TransformLambdaRole.Arn
+      # Firehose's Lambda invocation timeout cap is 5 min; the transform
+      # is pure CPU on a buffered batch, so 60s is ample.
+      Timeout: 60
+      MemorySize: 256
+      Code:
+        ZipFile: |
+          def lambda_handler(event, context):
+              # Placeholder. Real code deployed by 07-deploy-iceberg.sh.
+              raise RuntimeError(
+                  "firehose_transform.py not yet deployed; "
+                  "run infra/scripts/07-deploy-iceberg.sh"
+              )
+
+  TransformLambdaLogGroup:
+    Type: AWS::Logs::LogGroup
+    Condition: WantFirehose
+    Properties:
+      LogGroupName: !Sub "/aws/lambda/${ProjectName}-iceberg-transform"
+      RetentionInDays: 14
 
   # Where Firehose dumps records it can't write to Iceberg (parse
   # errors, schema mismatches, transient backend failures past retries).
@@ -260,6 +357,9 @@ Resources:
                 - redshift.amazonaws.com
                 - redshift-serverless.amazonaws.com
             Action: sts:AssumeRole
+            Condition:
+              StringEquals:
+                aws:SourceAccount: !Ref AWS::AccountId
       Policies:
         - PolicyName: GlueRead
           PolicyDocument:
@@ -276,13 +376,16 @@ Resources:
                   - glue:GetPartition
                   - glue:GetPartitions
                 Resource:
+                  # Mirrors FirehoseRole's GlueIceberg patterns; Spectrum
+                  # walks the same s3tablescatalog parent → bucket-nested
+                  # → DB → table chain when querying the cold archive.
+                  # ARN shapes per AWS Glue docs (see comment in the
+                  # Firehose role above for the full spec).
                   - !Sub "arn:aws:glue:${AWS::Region}:${AWS::AccountId}:catalog"
                   - !Sub "arn:aws:glue:${AWS::Region}:${AWS::AccountId}:catalog/s3tablescatalog"
                   - !Sub "arn:aws:glue:${AWS::Region}:${AWS::AccountId}:catalog/s3tablescatalog/*"
-                  - !Sub "arn:aws:glue:${AWS::Region}:${AWS::AccountId}:database/s3tablescatalog/*"
-                  - !Sub "arn:aws:glue:${AWS::Region}:${AWS::AccountId}:database/*/s3tablescatalog/*"
-                  - !Sub "arn:aws:glue:${AWS::Region}:${AWS::AccountId}:table/s3tablescatalog/*/*"
-                  - !Sub "arn:aws:glue:${AWS::Region}:${AWS::AccountId}:table/*/s3tablescatalog/*/*"
+                  - !Sub "arn:aws:glue:${AWS::Region}:${AWS::AccountId}:database/s3tablescatalog/*/*"
+                  - !Sub "arn:aws:glue:${AWS::Region}:${AWS::AccountId}:table/s3tablescatalog/*/*/*"
         - PolicyName: S3TablesRead
           PolicyDocument:
             Version: "2012-10-17"
@@ -339,7 +442,7 @@ Resources:
   # =========================================================================
   FirehoseStream:
     Type: AWS::KinesisFirehose::DeliveryStream
-    Condition: WantFirehose
+    Condition: WantFirehoseStream
     Properties:
       DeliveryStreamName: !Sub "${ProjectName}-iceberg"
       DeliveryStreamType: KinesisStreamAsSource
@@ -371,6 +474,22 @@ Resources:
           - DestinationDatabaseName: cdc
             DestinationTableName: cdc_events_archive
             S3ErrorOutputPrefix: !Sub "errors/${ProjectName}/cdc_events_archive/"
+        # Reshape DSQL CDC records into the Iceberg column layout before
+        # delivery. Without this, Firehose's direct key->column mapping
+        # rejects every record into the error bucket.
+        ProcessingConfiguration:
+          Enabled: true
+          Processors:
+            - Type: Lambda
+              Parameters:
+                - ParameterName: LambdaArn
+                  ParameterValue: !GetAtt TransformLambda.Arn
+                # Keep the synchronous request payload well under the
+                # 6 MB Lambda limit Firehose enforces for transforms.
+                - ParameterName: BufferSizeInMBs
+                  ParameterValue: "3"
+                - ParameterName: BufferIntervalInSeconds
+                  ParameterValue: "60"
         BufferingHints:
           IntervalInSeconds: !Ref IcebergBufferSeconds
           SizeInMBs: !Ref IcebergBufferMB
@@ -443,7 +562,7 @@ Outputs:
       Name: !Sub "${ProjectName}-iceberg-redshift-role-arn"
 
   FirehoseStreamArn:
-    Condition: WantFirehose
+    Condition: WantFirehoseStream
     Description: Firehose delivery stream ARN
     Value: !GetAtt FirehoseStream.Arn
     Export:

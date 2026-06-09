@@ -12,21 +12,32 @@ This is **not** a published library. There's no package, no distribution. It exi
 
 ```
 app/
-  cdc_processor.py     Lambda handler — parses Kinesis CDC records, INSERTs into Redshift cdc_events
-  order_simulator.py   psycopg-based order driver (insert/update/delete) against the DSQL schema
-  requirements.txt     boto3 + psycopg[binary] (simulator-side only — Lambda uses bundled boto3)
+  cdc_processor.py        Hot-path Lambda — parses Kinesis CDC records, INSERTs into Redshift cdc_events
+  firehose_transform.py   Cold-path Lambda — reshapes raw DSQL CDC records into the Iceberg column layout
+  order_simulator.py      psycopg-based order driver (insert/update/delete) against the DSQL schema
+  requirements.txt        boto3 + psycopg[binary] (simulator-side only — Lambda uses bundled boto3)
 infra/
-  cloudformation.yaml  DSQL cluster, Kinesis stream, IAM roles, Redshift namespace+workgroup, Lambda shell, event source mapping
+  cloudformation.yaml             Base stack: DSQL cluster, Kinesis, IAM, Redshift namespace+workgroup, hot-path Lambda, event source
+  cloudformation-simulator.yaml   Optional: always-on Fargate order simulator
+  cloudformation-sagemaker.yaml   Optional: SageMaker exec role + Redshift access
+  cloudformation-iceberg.yaml     Optional: Firehose → S3 Tables Iceberg cold path + Redshift Spectrum role
   scripts/
-    bootstrap.sh       One-shot orchestrator
-    01..04-*.sh        Individual phases (CFN deploy → CDC stream → schemas → Lambda code)
-    teardown.sh        Removes everything (assumes DSQL deletion protection is off)
-    _lib.sh            Shared helpers (log/ok/warn/err, require, stack_output, check_aws_creds)
+    bootstrap.sh         One-shot orchestrator (base + interactive prompts for each add-on)
+    01-deploy-cfn.sh     Base CFN deploy
+    02-create-cdc-stream.sh  DSQL CDC stream (out-of-CFN — public-preview API has no resource type yet)
+    03-load-schemas.sh   DSQL + Redshift schema load
+    04-deploy-lambda-code.sh  Hot-path Lambda code
+    05-deploy-simulator.sh    Optional: always-on simulator
+    06-deploy-sagemaker.sh    Optional: SageMaker access
+    07-deploy-iceberg.sh      Optional: Iceberg cold path (3-phase deploy + LF grants + transform code + Redshift wire-up)
+    teardown.sh           Removes everything (assumes DSQL deletion protection is off)
+    _lib.sh               Shared helpers (log/ok/warn/err, require, stack_output, check_aws_creds, lf_grant, redshift_data_run_*, confirm)
 schema/
-  dsql_schema.sql      Source schema (customers, products, orders, order_items)
-  redshift_schema.sql  Append-only cdc_events log + current-state views via ROW_NUMBER over commit_timestamp
+  dsql_schema.sql                 Source schema (customers, products, orders, order_items)
+  redshift_schema.sql             Hot path: append-only cdc_events log + current-state views via ROW_NUMBER over commit_timestamp
+  redshift_iceberg_external.sql   Cold path: cold.cdc_events_archive external schema + unified hot+cold views
 analytics/
-  sample_queries.sql   Example queries against the materialized current-state views
+  sample_queries.sql    Example queries against the materialized current-state views
 ```
 
 ## Commands
@@ -56,6 +67,8 @@ There are no unit tests. Validation lives in CI: `ruff check`, `ruff format --ch
 - **`ManageAdminPassword: true`** on the Redshift namespace means the password is generated and rotated by AWS in Secrets Manager. The Lambda doesn't touch it; it uses Data API + IAM auth via `redshift-serverless:GetCredentials`.
 - **`BatchSize: 100` on the EventSourceMapping** is the upper bound on records per Lambda invocation. The Lambda chunks internally to stay within Redshift Data API's 200-parameter limit, so 100 records × 5 params = 500 params total → 13 chunks max. Don't raise BatchSize beyond what the chunking can absorb within the Lambda timeout (currently 120s).
 - **No DeletionPolicy on Redshift resources.** This is a demo stack — `teardown.sh` is meant to remove everything. For production, add `DeletionPolicy: Snapshot` to the Namespace.
+- **The Iceberg cold path adds more out-of-CFN steps** for the same reason as the base path: API races with namespace propagation (CFN's resource handler gives up before S3 Tables CreateTable settles), Lake Formation grants (need an IAM principal that doesn't exist until Phase A finishes), transform Lambda code (too large for inline ZipFile), and Redshift wire-up (CREATE EXTERNAL SCHEMA + view DDL needs admin secret). All of these live in `07-deploy-iceberg.sh`'s post-stack phases. Same pattern, more of it.
+- **`lf_grant` must be loud, not silent.** Lake Formation grants that fail silently let a downstream `aws firehose create-delivery-stream` fail with an opaque `glue:GetTable` error hours later. The `lf_grant` helper in `_lib.sh` only treats "already exists" as an OK outcome; everything else aborts. Use it for every LF grant — applying it inconsistently was caught in code review as a real bug. **Don't go back to raw `aws lakeformation grant-permissions ... \|\| true`.**
 
 ## Testing
 

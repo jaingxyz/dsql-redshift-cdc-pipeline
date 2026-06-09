@@ -164,3 +164,233 @@ skill should:
 Phase 2 (Firehose) **deployed successfully**. The blocker is the Redshift
 external schema needing an IAM role. Once that's fixed, we can verify
 Firehose is delivering, then add the UNION view.
+
+---
+
+## Update — issues 7-9 (Redshift auto-mount)
+
+### 7. `!Ref TableBucket` returns the ARN, not the name (revisited)
+
+Fixed by extracting via `!Select [1, !Split ["/", !GetAtt TableBucket.TableBucketARN]]`. This pattern is needed in 4+ places. **A skill should provide a YAML snippet that wraps it in a Mappings or local once.**
+
+### 8. Firehose validates Iceberg destination synchronously
+
+`AWS::KinesisFirehose::DeliveryStream` with `IcebergDestinationConfiguration` calls `glue:GetTable` during stack create, not first-use. Makes single-shot deploys impossible: bucket+namespace+table must exist first. We split into a two-phase CFN deploy controlled by an `EnableFirehose` parameter.
+
+### 9. Auto-mount needs Lake Formation access control on the bucket integration
+
+> **Superseded by issue 18 / final code.** Issues 9 and 10 below describe
+> the auto-mount + 3-part `<bucket>@s3tablescatalog.<ns>.<table>` naming
+> approach. The final code abandoned that path entirely — it uses a Glue
+> resource link in the default catalog plus `CREATE EXTERNAL SCHEMA cold
+> ... CATALOG_ID '<account-id>'`. Keep these notes for the cautionary
+> tale, but don't replicate the approach.
+
+
+The `s3tablescatalog/<bucket>` Glue catalog has a `CreateDatabaseDefaultPermissions` of `IAM_ALLOWED_PRINCIPALS / ALL`. This is **IAM access control mode** — federated tables are visible only via direct `glue:*` calls + `s3tables:*` data perms, NOT via Redshift auto-mount.
+
+Redshift's `awsdatacatalog` auto-mount and the `"<bucket>@s3tablescatalog".<ns>.<table>` 3-part syntax both require **Lake Formation access control mode**, where:
+- The bucket is registered as an LF resource (`aws lakeformation register-resource`)
+- The catalog's default permissions exclude `IAM_ALLOWED_PRINCIPALS`
+- LF grants determine all access
+
+Switching modes is account-wide-ish (per-bucket but affects how anything else queries it). For our case it's safe — only the iceberg path uses this bucket. But a skill should warn: "if you have existing IAM-mode S3 Tables and switch one to LF mode, queries from non-LF-aware engines break."
+
+### 10. The naming format I had wrong
+
+I tried `awsdatacatalog."s3tablescatalog/<bucket>".<ns>.<table>` (4-part). **Wrong.** Correct: `"<bucket>@s3tablescatalog".<ns>.<table>` (3-part with quoted catalog using `@` separator).
+
+### 11. ada credentials don't change default profile
+
+`ada credentials update --account X --role Admin` writes to a separate profile (e.g. `gujain_acnt_isen_ada`), not the default. Use `AWS_PROFILE=gujain_acnt_isen_ada` to actually use it.
+
+### 12. SageMaker role was the only LF Data Lake Admin
+
+Until I added the Admin role, even `sts:AssumeRole/Admin` could not grant LF permissions because Admin wasn't a registered Data Lake Admin. Used `put-data-lake-settings` to add it.
+
+## Updated patterns we should have known up front
+
+These should be the bullet points of a future `redshift-serverless-iceberg-coldpath` skill:
+
+9. **`!Ref TableBucket` returns the ARN.** Always extract via Split.
+10. **`AWS::S3Tables::Table` resource handler is unreliable** due to namespace propagation lag — use a script with bash retries.
+11. **`AWS::KinesisFirehose::DeliveryStream` with `IcebergDestinationConfiguration` validates the destination synchronously** — two-phase deploy required.
+12. **`destinationDatabaseName`** in Firehose config rejects slashes/hyphens — must match `[a-zA-Z0-9._]+`.
+13. **The bucket-nested catalog ARN is** `arn:aws:glue:<region>:<account>:catalog/s3tablescatalog/<bucket-name>`. Database name is the namespace alone.
+14. **For Redshift auto-mount of S3 Tables**, the bucket integration must be in **Lake Formation access control mode**, not IAM mode. Set `AllowFullTableExternalDataAccess=False` and `CreateDatabaseDefaultPermissions=[]` (no IAM_ALLOWED_PRINCIPALS) when creating the catalog.
+15. **Three-part naming for S3 Tables** is `"<bucket>@s3tablescatalog".<namespace>.<table>` — note the `@` separator and the double quotes.
+16. **`ada credentials update` writes to a non-default profile** — use `AWS_PROFILE=...` to switch.
+17. **LF `GrantPermissions` requires the caller to be a Data Lake Administrator**, not just an IAM admin. Add yourself via `put-data-lake-settings` first.
+
+## Time totals
+
+- ~25 min: namespace propagation race
+- ~15 min: !Ref returns ARN
+- ~10 min: bucket name cooldown
+- ~10 min: Firehose synchronous validation
+- ~30 min: figuring out auto-mount really needs LF mode
+- ~10 min: figuring out the @s3tablescatalog naming
+- ~10 min: figuring out ada profile + LF admin
+
+**Total iteration overhead: ~110 min** for what should have been a 30 min task with the right skill.
+
+---
+
+## Update — issues 13-18 (transform Lambda, deploy idempotency, NO SCHEMA BINDING)
+
+The session-resumption point above ("phase 2 deployed successfully, blocker is
+external schema needing IAM role") buried the real bug: **Firehose was
+delivering 0 rows.** 100% of records landed in `errors/iceberg-failed/`
+with `Iceberg.MissingColumnWithinRecord`.
+
+### 13. Firehose maps RAW Kinesis JSON keys to Iceberg columns by name
+
+`AWS::KinesisFirehose::DeliveryStream`'s `IcebergDestinationConfiguration`
+takes the top-level JSON keys of each Kinesis record and maps them to
+columns by name. DSQL CDC records are
+`{op, after, before, source, ts_ms, ...}` — those keys share **nothing**
+with the Iceberg columns (`source_table, operation, record_id, event_data,
+commit_timestamp, ingested_at`). Firehose rejects every record.
+
+**Fix**: a transform Lambda (`app/firehose_transform.py`) wired in via
+`ProcessingConfiguration` that reshapes each record into the column
+layout. Mirrors `cdc_processor._row_for_op` so hot and cold paths agree
+on what each event means.
+
+**Skill bullet**: any direct Kinesis -> Iceberg pipe needs a transform
+unless the producer ALREADY emits the destination column shape. The
+docs describe this — but the absence of `ProcessingConfiguration` in
+the CFN doesn't surface as a static error, only as 100% delivery
+failures into the error bucket.
+
+### 14. Iceberg timestamp columns expect MICROSECONDS in JSON
+
+DSQL CDC carries `ts_ms` (milliseconds since epoch). The transform
+multiplies by 1000. The Firehose docs say "Timestamp data must always
+be sent in microseconds" but it's a one-line note buried under
+"supported data types".
+
+### 15. `aws cloudformation deploy` parameter inheritance bites three-phase deploys
+
+`deploy` reuses the stack's previous parameter values for any flag not
+in `--parameter-overrides`. On a re-run against an already-stream-enabled
+stack, an unspecified `EnableFirehoseStream` inherits "true" from the
+prior deploy — yielding `WantFirehoseStream` without `WantFirehose` and
+"unresolved resource dependencies" because the stream's role / log
+group / error bucket are gated on `WantFirehose`.
+
+**Anti-fix**: pinning BOTH flags to false in Phase 1 fixed the
+inheritance bug but introduced a worse one: it **tore down the
+`FirehoseErrorBucket` on every re-run**, which then failed because the
+bucket held failed-delivery objects from the previous run, and S3's
+name-reservation cooldown blocks immediate recreation anyway.
+
+**Real fix**: collapse Phase 1 into Phase A (`EnableFirehose=true,
+EnableFirehoseStream=false`), keeping the error bucket / role / Lambda
+across re-runs and only toggling the stream itself. The original
+phasing assumed Phase 1 needed `EnableFirehose=false` to "create just
+the bucket and namespace before the table" — but Phase A creates the
+namespace too, so Phase 1 was redundant.
+
+### 16. `lakeformation grant-permissions` failures were swallowed by `|| true`
+
+The original deploy script appended `|| true` to LF grants on the
+theory they were idempotent. They are — for "already exists" — but
+`AccessDenied` (caller is not a Data Lake Admin) hit the same `|| true`
+and the missing grants then surfaced as opaque
+`Firehose: Role ... is not authorized to perform: glue:GetTable`
+errors at stream-create time.
+
+**Fix**: replaced `|| true` with a new `lf_grant` helper in `_lib.sh`
+that tolerates "already exists" but aborts on any other error. Now a
+non-admin caller fails LOUDLY at the LF step, not silently at the
+Firehose step ten minutes later.
+
+### 17. Default IAM identity wasn't a Data Lake Admin
+
+The session-log update above noted this for the SageMaker role; same
+pattern bit again for the default `user/AWSCLI` identity. Fix: add it
+via `put-data-lake-settings`, preserving existing admins (don't
+replace; LF settings are full-replace, easy to wipe by accident).
+
+The script supports `LF_ADMIN_PROFILE` to switch profiles, but adding
+the default identity to the admin list once is simpler than threading
+a profile env var through every run.
+
+### 18. Redshift views over external tables need `WITH NO SCHEMA BINDING`
+
+`CREATE VIEW ... AS SELECT ... FROM cold.cdc_events_archive` fails with
+`External tables are not supported in views`. Fix: append
+`WITH NO SCHEMA BINDING` — and as a transitive consequence, every view
+that references `cdc_events_all` (which references the external table)
+also needs it.
+
+Two side effects to know:
+- All relation names inside a `NO SCHEMA BINDING` view must be **fully
+  qualified** (`public.cdc_events`, not `cdc_events`). Forgetting the
+  schema prefix produces `All the relation names inside should be
+  qualified ...`.
+- `NO SCHEMA BINDING` removes the dependency tracking that would
+  otherwise block schema changes on referenced tables. Acceptable here
+  because the Iceberg schema is fixed by the deploy script.
+
+## Final patterns we should have known up front (consolidated)
+
+These are bullets a future `redshift-serverless-iceberg-coldpath` skill
+should lead with:
+
+1. **`!Ref TableBucket` returns the ARN** — extract via `!Select [1,
+   !Split ["/", !GetAtt TableBucket.TableBucketARN]]`.
+2. **`AWS::S3Tables::Table` resource handler is unreliable** — namespace
+   propagation lag of 5+ minutes; create the table in a script with
+   bash retries, not in CFN.
+3. **`AWS::KinesisFirehose::DeliveryStream` validates the Iceberg
+   destination synchronously** at create time — table must exist first
+   (two-phase deploy).
+4. **`destinationDatabaseName` rejects slashes/hyphens** — must match
+   `[a-zA-Z0-9._]+`. Use the namespace name only.
+5. **Bucket-nested catalog ARN** is
+   `arn:aws:glue:<region>:<account>:catalog/s3tablescatalog/<bucket>`.
+   Database name is the namespace alone.
+6. **Redshift auto-mount of S3 Tables requires LF mode**, not IAM mode,
+   on the bucket integration.
+7. **Three-part naming** is `"<bucket>@s3tablescatalog".<ns>.<table>`,
+   not `awsdatacatalog.<...>.<ns>.<table>`.
+8. **`ada credentials update`** writes to a non-default profile — use
+   `AWS_PROFILE=...`.
+9. **LF GrantPermissions requires Data Lake Admin** — add the default
+   identity via `put-data-lake-settings` (preserve existing admins).
+10. **Firehose direct Kinesis -> Iceberg maps top-level JSON keys to
+    columns by name** — needs a transform Lambda unless the producer
+    already emits the destination shape.
+11. **Iceberg `timestamp` columns expect microseconds in JSON.**
+12. **`aws cloudformation deploy` inherits prior parameter values** for
+    unspecified flags — pin every flag explicitly OR design phases so
+    re-runs don't toggle destructive flags.
+13. **Don't swallow LF grant errors with `|| true`** — `AccessDenied`
+    must abort, only "already exists" should be ignored.
+14. **Redshift views over external tables need `WITH NO SCHEMA BINDING`**
+    — and all referenced relations must be schema-qualified.
+
+## Time totals (updated)
+
+Original Part 2 (above): ~110 min iteration overhead.
+
+This session (continuation): ~90 min, broken down:
+- ~5 min: realize the cold path was delivering 0 rows (the "session
+  resume" line in the log was wrong about the real blocker).
+- ~10 min: confirm root cause by reading an error-bucket object.
+- ~15 min: build the transform Lambda + wire ProcessingConfiguration.
+- ~25 min: discover and fix the parameter-inheritance + destructive
+  Phase 1 collapse, plus 17 min of churn from the bad first attempt.
+- ~10 min: discover and fix the swallowed LF grant errors + add self
+  as Data Lake Admin.
+- ~15 min: write the unified view layer; hit `NO SCHEMA BINDING` and
+  schema-qualification errors; fix.
+- ~10 min: wire view-application into the deploy script + verify.
+
+**Total Part 2: ~200 min** for what a single skill should have made a
+40-min task. The skill, when written, must call out items 10-14 above
+explicitly — those were the ones that ate the most time in this
+continuation.
+

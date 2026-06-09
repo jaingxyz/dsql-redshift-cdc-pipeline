@@ -181,3 +181,29 @@ confirm() {
         *) return 1 ;;
     esac
 }
+
+# Run a Lake Formation grant-permissions call that is idempotent but
+# fails LOUDLY on real errors. Re-running a grant that already exists is
+# a no-op success in LF, so the only "ignorable" outcome is a literal
+# "already exists" message — anything else (especially AccessDenied,
+# which means the caller is not a Data Lake Admin) must abort, since a
+# silently-skipped grant lets Firehose stream creation fail downstream
+# with an opaque glue:GetTable error.
+# Args: the full `aws lakeformation grant-permissions ...` argv.
+lf_grant() {
+    local out rc=0
+    # The `|| rc=$?` form is required so `set -e` doesn't kill the
+    # script before we get a chance to inspect the failure. Plain
+    # `out=$("$@"); rc=$?` would never reach the `rc=$?` line on
+    # error — `set -e` aborts on the failing command-substitution
+    # assignment first.
+    out=$("$@" 2>&1) || rc=$?
+    if [ "${rc}" -eq 0 ]; then
+        return 0
+    fi
+    if printf '%s' "${out}" | grep -Eqi 'already exists'; then
+        log "LF grant already present (ok)"
+        return 0
+    fi
+    err "Lake Formation grant failed: ${out}"
+}
