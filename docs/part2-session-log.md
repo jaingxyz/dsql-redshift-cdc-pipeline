@@ -524,3 +524,77 @@ actually work*. Without the review pass, the manual one-shot test
 would have caught the SecretArn one (immediate failure), but the
 cutoff-drift bug would only surface as silent data loss under
 sustained load.
+
+### Live validation (2026-06-08 23:08 PT)
+
+Deployed `dsql-cdc-tiering` stack into account 239355724610 / us-east-1
+with `TIERING_SCHEDULE_STATE=DISABLED` and `TIERING_RETENTION_HOURS=24`.
+
+CFN outcome: `CREATE_COMPLETE` in ~30s. SecretArn resolved to
+`arn:aws:secretsmanager:us-east-1:239355724610:secret:redshift!dsql-cdc-ns-admin-9HxJrR`
+(full ARN with the 6-char Secrets Manager suffix — the fix from the
+review pass). All 7 resources reached CREATE_COMPLETE without error.
+
+Pre-prune state:
+- Hot `cdc_events`: 1,890,022 rows; oldest commit_timestamp 2026-05-30 03:42 UTC.
+- Cold `cold.cdc_events_archive`: 784,359 rows; oldest 2026-06-05 01:24 UTC.
+
+Triggered one manual execution via `aws stepfunctions start-execution`.
+
+**Outcome: SUCCEEDED in 31 seconds.** State path taken (verified via
+`get-execution-history`):
+
+```
+InitResolveCutoffPoll → SubmitResolveCutoff → DescribeResolveCutoff
+  → ResolveCutoffDone → ReadCutoff → PinCutoff
+  → InitSafetyCheckPoll → SubmitSafetyCheck → DescribeSafetyCheck
+  → SafetyCheckDone(loop once via IncrementSafetyCheckPoll)
+  → DescribeSafetyCheck → SafetyCheckDone(FINISHED)
+  → ReadSafetyResult → SafetyChoice
+  → InitDeletePoll → SubmitDelete → DescribeDelete → DeleteDone
+  → InitVacuumPoll → SubmitVacuum → DescribeVacuum → VacuumDone
+  → InitAnalyzePoll → SubmitAnalyze → DescribeAnalyze → AnalyzeDone
+  → Success
+```
+
+Exactly the design path. The poll-loop counter pattern works correctly
+(SafetyCheck looped once before FINISHED, then proceeded).
+
+Post-prune state:
+- Hot `cdc_events`: **186,938 rows; oldest 2026-06-08 06:07:59 UTC.**
+  That cutoff is "execution start (06-09 06:07:59 UTC) minus 24h" to
+  the second — the **pinned cutoff is honored exactly**. The earlier-
+  draft cutoff-drift bug would have produced an `oldest` value 1-3
+  minutes older; we don't see that, so the pin holds under live load.
+- Unified view `cdc_events_all`: hot=186,693 + cold=599,646 = 786,339
+  rows with the time-window split applied. No data lost.
+
+**DELETE pruned 1,703,084 rows in a single execution.** VACUUM DELETE
+ONLY + ANALYZE both completed within the 31-second total runtime —
+well under the 1-hour state-machine timeout and the per-step
+720-attempt poll cap.
+
+What this validates that static checks could not have:
+- The full SecretArn flowed through `DefinitionSubstitutions` to the
+  SFN definition and was accepted by `redshift-data:executeStatement`.
+  The earlier-draft truncated ARN would have failed every execution
+  at SubmitSafetyCheck.
+- `States.Format(... TIMESTAMP \'{}\'', $.cutoff.value)` rendered the
+  correct SQL — pinned-cutoff matched the post-prune `oldest` to the
+  second.
+- `aws:SourceAccount` condition on the SFN trust policy did not block
+  Step Functions itself from invoking the role.
+- `VACUUM DELETE ONLY` is accepted by Redshift Serverless. (Some
+  Redshift docs imply VACUUM is provisioned-only; Serverless
+  accepts it.)
+- `ANALYZE cdc_events` works as the post-DELETE stats refresh step.
+
+What's NOT yet validated:
+- Schedule firing on the EventBridge clock — schedule deployed
+  DISABLED. To enable, re-run with `TIERING_SCHEDULE_STATE=ENABLED`
+  after watching at least one more manual prune.
+- AbortNoArchive path — would only fire if cold had no rows older
+  than the cutoff. Today there are plenty. The path is structurally
+  identical to Success aside from the Choice routing.
+- SNS email subscription — `TIERING_ALERT_EMAIL` was empty for this
+  deploy. Re-run with the email set or add a subscription via console.
