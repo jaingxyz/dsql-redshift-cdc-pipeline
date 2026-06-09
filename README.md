@@ -55,6 +55,7 @@ near-zero, active cost scales linearly with traffic.
 │   ├── cloudformation-simulator.yaml   # Optional: always-on Fargate order simulator
 │   ├── cloudformation-sagemaker.yaml   # Optional: SageMaker exec role + Redshift access
 │   ├── cloudformation-iceberg.yaml     # Optional: Firehose → S3 Tables Iceberg cold path
+│   ├── cloudformation-tiering.yaml     # Optional: Step Functions prune of cdc_events older than 24h
 │   ├── scripts/
 │   │   ├── bootstrap.sh         # One-shot orchestrator
 │   │   ├── 01-deploy-cfn.sh
@@ -64,6 +65,7 @@ near-zero, active cost scales linearly with traffic.
 │   │   ├── 05-deploy-simulator.sh
 │   │   ├── 06-deploy-sagemaker.sh
 │   │   ├── 07-deploy-iceberg.sh
+│   │   ├── 08-deploy-tiering.sh
 │   │   ├── teardown.sh
 │   │   └── _lib.sh              # Shared helpers
 │   └── README.md                # Detailed infrastructure docs

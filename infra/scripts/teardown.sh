@@ -54,7 +54,14 @@ delete_stack_if_exists() {
 }
 
 # 0. Optional add-on stacks first — they import from the base stack
-# and have to go before its exports can be removed.
+# and have to go before its exports can be removed. Tiering goes
+# BEFORE iceberg because the prune state machine queries
+# cold.cdc_events_archive; if EventBridge fires mid-teardown after
+# the iceberg stack is gone, the run would just abort safely (cold
+# table empty) — but deleting tiering first removes the schedule
+# entirely, which is cleaner.
+delete_stack_if_exists "${PROJECT_NAME}-tiering" "tiering automation"
+delete_stack_if_exists "${PROJECT_NAME}-iceberg" "Iceberg cold path"
 delete_stack_if_exists "${PROJECT_NAME}-sagemaker" "SageMaker access"
 delete_stack_if_exists "${PROJECT_NAME}-simulator" "always-on simulator"
 

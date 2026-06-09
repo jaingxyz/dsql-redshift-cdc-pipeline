@@ -203,6 +203,61 @@ Reference docs:
 
 Tear down: `aws cloudformation delete-stack --stack-name dsql-cdc-sagemaker`
 
+### Hot/cold tiering automation (`cloudformation-tiering.yaml`)
+
+Periodically prunes `cdc_events` (the hot path) of rows older than a
+retention horizon, gated on `cold.cdc_events_archive` having received
+rows for the same window. Without this, hot grows forever and the
+unified view's hot/cold UNION just gets slower over time.
+
+**Prerequisite:** the Iceberg cold path (`07-deploy-iceberg.sh`) must
+already be running and Firehose must have flushed at least once. The
+safety check queries `cold.cdc_events_archive` directly — if Firehose
+has never flushed, every prune aborts with the "cold archive empty"
+SNS alert.
+
+```bash
+infra/scripts/08-deploy-tiering.sh
+```
+
+**What gets created:**
+
+- A Step Functions state machine that submits the safety check, then
+  the `DELETE`, then `VACUUM DELETE ONLY`, then `ANALYZE`. Each
+  Redshift Data API call is async, so each step has a poll loop.
+- An EventBridge Scheduler entry that invokes the state machine on a
+  schedule. **Deploys `DISABLED` by default** — run a manual
+  `start-execution` first to verify the safety check works against
+  live data, then enable.
+- An SNS topic for abort/failure alerts. Set `TIERING_ALERT_EMAIL=...`
+  before running the script to subscribe an email at deploy time.
+
+**Knobs:**
+
+| Env var | Default | Production value |
+|---|---|---|
+| `TIERING_RETENTION_HOURS` | `24` (demo) | `720` (30d) |
+| `TIERING_SCHEDULE` | `rate(1 day)` | `cron(0 6 1 * ? *)` (monthly, 06:00 UTC, 1st) |
+| `TIERING_SCHEDULE_STATE` | `DISABLED` | `ENABLED` after manual verification |
+| `TIERING_ALERT_EMAIL` | empty | required for production |
+
+**Manual one-shot test:**
+
+```bash
+SM_ARN=$(aws cloudformation describe-stacks --stack-name dsql-cdc-tiering \
+    --query "Stacks[0].Outputs[?OutputKey=='StateMachineArn'].OutputValue" \
+    --output text)
+aws stepfunctions start-execution --state-machine-arn "$SM_ARN"
+# Watch the execution graph in the Step Functions console.
+```
+
+Expected paths: `SafetyCheck → SubmitDelete → Vacuum → Analyze → Success`
+when there's archived data, or `SafetyCheck → AbortNoArchive` (publishes
+SNS, ends successfully) when the cold side has zero rows for the window.
+
+Tear down: handled by `teardown.sh` (deletes the tiering stack before the
+Iceberg stack so the schedule is gone before the cold archive disappears).
+
 ## Tearing it down
 
 ```bash

@@ -21,6 +21,7 @@ infra/
   cloudformation-simulator.yaml   Optional: always-on Fargate order simulator
   cloudformation-sagemaker.yaml   Optional: SageMaker exec role + Redshift access
   cloudformation-iceberg.yaml     Optional: Firehose → S3 Tables Iceberg cold path + Redshift Spectrum role
+  cloudformation-tiering.yaml     Optional: Step Functions prune of cdc_events older than retention horizon
   scripts/
     bootstrap.sh         One-shot orchestrator (base + interactive prompts for each add-on)
     01-deploy-cfn.sh     Base CFN deploy
@@ -30,6 +31,7 @@ infra/
     05-deploy-simulator.sh    Optional: always-on simulator
     06-deploy-sagemaker.sh    Optional: SageMaker access
     07-deploy-iceberg.sh      Optional: Iceberg cold path (3-phase deploy + LF grants + transform code + Redshift wire-up)
+    08-deploy-tiering.sh      Optional: tiering automation (Step Functions + EventBridge Scheduler)
     teardown.sh           Removes everything (assumes DSQL deletion protection is off)
     _lib.sh               Shared helpers (log/ok/warn/err, require, stack_output, check_aws_creds, lf_grant, redshift_data_run_*, confirm)
 schema/

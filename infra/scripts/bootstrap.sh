@@ -20,6 +20,8 @@
 #   DEPLOY_SIMULATOR=0    skip the prompt and DON'T deploy
 #   DEPLOY_SAGEMAKER=1    skip the prompt and deploy the SageMaker stack
 #   DEPLOY_SAGEMAKER=0    skip the prompt and DON'T deploy
+#   DEPLOY_TIERING=1      skip the prompt and deploy the tiering stack
+#   DEPLOY_TIERING=0      skip the prompt and DON'T deploy
 #
 # Usage:
 #   ./bootstrap.sh
@@ -58,6 +60,10 @@ echo "  - Simulator stack:  always-on Fargate task driving ~1 order/sec."
 echo "                      Adds ~\$80-200/mo (mostly Redshift RPU-hours)."
 echo "  - SageMaker stack:  IAM role + Redshift GRANTs for notebook access."
 echo "                      Free; just IAM. Run later with 06-deploy-sagemaker.sh."
+echo "  - Tiering stack:    Step Functions + EventBridge prune of cdc_events"
+echo "                      older than 24h. Requires the Iceberg cold path"
+echo "                      (07-deploy-iceberg.sh). Schedule deploys DISABLED;"
+echo "                      operator triggers a manual run first to verify."
 echo
 # Add-ons are intentionally NOT failure-fatal: the base pipeline is
 # already up by this point, and we want the user to see the success
@@ -71,6 +77,11 @@ fi
 if confirm "Deploy the SageMaker access stack now?" DEPLOY_SAGEMAKER; then
     bash "${SCRIPT_DIR}/06-deploy-sagemaker.sh" \
         || warn "06-deploy-sagemaker.sh failed; base pipeline is unaffected. Re-run the script when ready."
+fi
+
+if confirm "Deploy the tiering automation stack now? (requires Iceberg cold path)" DEPLOY_TIERING; then
+    bash "${SCRIPT_DIR}/08-deploy-tiering.sh" \
+        || warn "08-deploy-tiering.sh failed; base pipeline is unaffected. Re-run the script when ready."
 fi
 
 echo

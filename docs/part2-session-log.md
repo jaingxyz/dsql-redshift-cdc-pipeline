@@ -394,3 +394,133 @@ This session (continuation): ~90 min, broken down:
 explicitly — those were the ones that ate the most time in this
 continuation.
 
+## Update — hot/cold tiering automation
+
+Until this point, hot (`cdc_events`) and cold (`cold.cdc_events_archive`)
+both grew forever in parallel. The unified view (`cdc_events_all`) does
+the time-window split at query time, so duplicates exist on disk but are
+deduped in queries. Functional, but unbounded — production needs to
+prune hot.
+
+### Design choice: Step Functions over a Lambda
+
+A single Lambda was the obvious first option (one runtime, one log
+group, one IAM role). The state machine wins for three reasons specific
+to this pipeline:
+
+1. **Each step's success is independently observable in the console.**
+   Step Functions execution history shows SafetyCheck = FINISHED with
+   the count, then Delete = FINISHED with the row count, etc. A Lambda
+   has to log all of that itself, and post-mortem on a failed run means
+   reading CloudWatch Logs rather than scanning a graph. For a
+   process whose primary failure mode is "should we have deleted?",
+   inspectability is the feature.
+2. **The poll loop is async-Redshift's natural shape.** `ExecuteStatement`
+   returns immediately; the actual work happens server-side. A Lambda
+   either polls in-process (paying for idle Lambda time during VACUUM) or
+   chains itself via Step Functions anyway. Wrapping the whole flow in a
+   state machine collapses both options into the simpler one.
+3. **The Choice state IS the safety guard.** The "if cold count == 0,
+   abort" decision is a one-line `Choice` with the result path threaded
+   through. In a Lambda it's one more `if` block to read, one more
+   branch to test. Concurrent with the SF AWS-SDK integration, this
+   means the entire prune is zero lines of business code — the state
+   machine definition is the implementation.
+
+### Safety-check semantics
+
+Before pruning `cdc_events` rows older than the retention horizon, the
+state machine asserts that `cold.cdc_events_archive` has rows for the
+same window. The intent is: *don't delete from hot unless cold has
+already received what we're about to lose.*
+
+Sharp edges:
+
+- **The cutoff is pinned at execution start, not recomputed per step.**
+  An earlier draft computed `DATEADD(hour, -RetentionHours, GETDATE())`
+  inside the SafetyCheck SQL *and* the DELETE SQL. Code review caught
+  that this defeats the safety claim: SafetyCheck and DELETE would run
+  1–3 minutes apart, so rows whose `commit_timestamp` crossed the
+  cutoff during execution could be DELETEd from hot without ever
+  having been verified in cold. The fixed shape resolves the cutoff
+  once via a `SubmitResolveCutoff` step and pins the result into
+  `$.cutoff.value`; both predicates use that pinned literal.
+- **The check is "any rows older than cutoff", not "the same rows".**
+  We don't compare primary keys hot-vs-cold. That would be safer but
+  much more expensive — cold is in S3 Tables, scanning per-PK costs
+  more than the prune saves. The "any rows older" check is a coarse
+  proxy: if Firehose has flushed *anything* for the window, it has
+  almost certainly flushed *everything*, because Firehose is a
+  monotonic stream. The failure mode it doesn't catch is "Firehose
+  flushed events 1–1000 successfully, then transform Lambda errors
+  caused 1001–2000 to land in the error bucket". The CloudWatch
+  alarm on transform Lambda errors is the second line of defense for
+  that one — see "Production hardening" below.
+- **`COUNT(*)` on Iceberg should be cheap in Redshift.** Spectrum can
+  satisfy a `COUNT(*) WHERE timestamp < cutoff` predicate by walking
+  the Iceberg manifest's per-file min/max stats, without scanning
+  parquet content. Not benchmarked in this stack; assume "tens of ms"
+  rather than "single-digit ms" until measured.
+- **Aborts surface as FAILED executions.** An earlier draft had the
+  abort path end with `Succeed`, which buried the signal — operators
+  scanning for failures would see only green. Fixed shape: `Abort
+  → SNS publish → Fail`, so console + email both light up.
+
+### Schedule defaults
+
+- **`ScheduleEnabled: DISABLED`** by default. The first run is always
+  manual (`aws stepfunctions start-execution`). Two reasons: (a) gives
+  the operator a chance to verify the SafetyCheck matches their mental
+  model of what's in cold; (b) catches the common case where the stack
+  was deployed before the cold path had ever flushed — the manual run
+  fires AbortNoArchive and surfaces the issue immediately, instead of
+  EventBridge silently aborting daily for a week.
+- **Demo: `rate(1 day)`, retention 24h.** Mirrors the unified view's
+  hot/cold window. Fast feedback, easy to validate.
+- **Production: `cron(0 6 1 * ? *)`, retention 30d.** Monthly prune at
+  06:00 UTC on the 1st. Different reason: at 30d retention, daily
+  prunes save almost nothing (you delete one day out of thirty); a
+  monthly prune that deletes ~30 days at once amortizes the
+  VACUUM cost across thirty deletions worth of holes.
+
+### Production hardening (deferred — call out in the post)
+
+What this stack does NOT yet do, that it should before being trusted on
+real data:
+
+- **Alarm on transform Lambda error rate.** If `dsql-cdc-iceberg-transform`
+  is dropping records, the cold archive count grows at less than the
+  rate it should — but still grows, so the SafetyCheck still passes.
+  Need a separate CloudWatch alarm wired to the same SNS topic: gate
+  the schedule on the alarm's state, not just on the SafetyCheck.
+- **Alarm on Firehose `DeliveryToIceberg.SuccessfulRowCount` going to
+  zero while `IncomingRecords > 0`.** Same idea, lower in the stack:
+  catch the case where Firehose is receiving but not delivering.
+- **`VACUUM DELETE ONLY` is the right choice for an append-mostly
+  table.** It reclaims space from the deleted rows without rewriting
+  the sort order. If the table ever sees in-place updates (current
+  schema doesn't, but if a future revision did), upgrade to plain
+  `VACUUM`.
+- **`DeletionPolicy: Snapshot` on Redshift in the base stack** — the
+  README already calls this out. Tiering doesn't change the
+  recommendation, but if you're committing to the prune, the snapshot
+  policy matters more, not less.
+
+### Time
+
+- ~30 min: design + first-pass CFN + script + bootstrap/teardown
+  wiring + this log.
+- ~25 min: 3-reviewer panel (code-review skill, AutoCR-style fidelity,
+  EdgeSwarm swarm-code-reviewer) found 8 must-fix items including the
+  cutoff-drift bug, the SecretArn missing-suffix bug (state machine
+  would have failed every execution at SubmitSafetyCheck), an abort
+  path that hid signal, and a doc-comment that lied about retry
+  bounds. Apply + re-validate.
+
+**Total: ~55 min**, with the second half spent on review-driven
+correctness fixes the first pass missed. Worth recording: the cutoff
+bug and the SecretArn bug were both *plausible-looking code that didn't
+actually work*. Without the review pass, the manual one-shot test
+would have caught the SecretArn one (immediate failure), but the
+cutoff-drift bug would only surface as silent data loss under
+sustained load.
