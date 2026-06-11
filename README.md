@@ -15,6 +15,7 @@ showcase the use cases.
 >
 > **Part 1 - Zero-ETL DSQL -> Redshift, Almost.**
 > [Substack](https://gauravjx.substack.com/p/zero-etl-dsql-to-redshift-almost) ·
+> [Medium](https://medium.com/@jaingxyz/zero-etl-dsql-to-redshift-almost-4b10984cefdc) ·
 > [AWS Builder Center](https://builder.aws.com/content/39S4beDMSbn6piEwUXKUxyNpjkM/zero-etl-dsql-to-redshift-almost)
 >
 > **Part 2a - From Operational to Analytical, Without Choosing Sides.**
