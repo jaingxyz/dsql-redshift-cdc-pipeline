@@ -22,6 +22,11 @@ showcase the use cases.
 > [Substack](https://gauravjx.substack.com/p/from-operational-to-analytical-without) ·
 > [Medium](https://medium.com/@jaingxyz/from-operational-to-analytical-without-choosing-sides-715e5092169a) ·
 > [AWS Builder Center](https://builder.aws.com/content/3EvBZ8EaPyG5NtVrmmNG8iy5a6A/from-operational-to-analytical-without-choosing-sides)
+>
+> **Part 2b - From Operational to Analytical, Letting It Run.**
+> [Substack](https://substack.com/home/post/p-202156289) ·
+> [Medium](https://medium.com/@jaingxyz/from-operational-to-analytical-without-choosing-sides-2d29e62d1632) ·
+> [AWS Builder Center](https://builder.aws.com/content/3FBGh2yI8ZQxDJvoypoBE7ZoAov/from-operational-to-analytical-part-2b-letting-it-run)
 
 ---
 
