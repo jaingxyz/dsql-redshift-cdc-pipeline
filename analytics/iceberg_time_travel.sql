@@ -20,14 +20,21 @@
 -- Why two catalogs in Athena matter (also validated live):
 --   The Glue *resource link* (`dsql-cdc_iceberg_link`) that Redshift reads
 --   through allows `count(*)` but blocks column access and hides the Iceberg
---   metadata tables. Query the NATIVE S3 Tables catalog instead:
---     catalog  = s3tablescatalog/<your-table-bucket>
---     database = <your-namespace>            (e.g. cdc)
---     table    = cdc_events_archive
---   The querying identity also needs a Lake Formation SELECT grant on the
---   table in that catalog; `count(*)` succeeding while `SELECT col` fails
---   with "Relation contains no accessible columns" is the tell-tale of a
---   missing column grant.
+--   metadata tables. Query the NATIVE S3 Tables catalog instead. Mind the two
+--   different identifier forms for the same catalog:
+--     * Athena/Glue API context (e.g. start-query-execution --query-execution-
+--       context Catalog=...): the federated path  s3tablescatalog/<bucket>
+--     * SQL identifier inside a query: the 3-part, double-quoted, @-separated
+--       form  "<bucket>@s3tablescatalog".<namespace>.<table>
+--       (the slash form is NOT a valid SQL identifier and is rejected).
+--     database/namespace = <your-namespace>   (e.g. cdc)
+--     table              = cdc_events_archive
+--   The querying identity also needs a Lake Formation grant on the table
+--   (table-level SELECT + DESCRIBE; the bucket-nested catalog and namespace
+--   need DESCRIBE too). `count(*)` succeeding while `SELECT col` fails with
+--   "Relation contains no accessible columns" is the tell-tale of a missing
+--   table grant. Granting requires Data-Lake-Admin status on the account.
+--   (See the `lakehouse-redshift` skill for the full grant sequence.)
 
 
 -- ===========================================================================
