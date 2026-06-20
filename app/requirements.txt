@@ -2,5 +2,5 @@
 # against this repo). The Lambda function uses only `boto3`, which is
 # bundled in the Lambda runtime — no Lambda-side install needed.
 
-boto3>=1.43.28
+boto3>=1.43.33
 psycopg[binary]>=3.3.4
