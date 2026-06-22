@@ -5,14 +5,17 @@ name: Dependabot auto-merge
 # and branch protection with required checks on the default branch.
 on: pull_request_target
 
+# Default the workflow token to read-only; grant write only on the job below.
 permissions:
-  contents: write
-  pull-requests: write
+  contents: read
 
 jobs:
   auto-merge:
     runs-on: ubuntu-latest
     if: github.actor == 'dependabot[bot]'
+    permissions:
+      contents: write
+      pull-requests: write
     steps:
       - name: Enable auto-merge (squash)
         run: gh pr merge --auto --squash "$PR_URL"
