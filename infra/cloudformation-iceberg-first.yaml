@@ -1,0 +1,111 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >
+  Part 3 Iceberg-first: a second Redshift Serverless namespace + workgroup
+  that reads the existing Iceberg cold archive directly - no hot table, no
+  CDC writer, no prune, no UNION views. Additive and optional; stands beside
+  the dual-write pipeline so both workgroups read the same Iceberg table as a
+  cost/latency A/B. Reuses the iceberg stack's data-lake query IAM role (no
+  new IAM or Lake Formation grants). The `cold` external schema is created
+  out-of-band by scripts/09-deploy-iceberg-first.sh. See infra/README.md.
+
+Parameters:
+  ProjectName:
+    Type: String
+    Default: dsql-cdc
+    Description: >
+      Must match the base stack's ProjectName (and the iceberg stack's).
+      Used to import the existing data-lake query role and to name resources.
+    AllowedPattern: "^[a-z][a-z0-9-]{2,30}$"
+
+  RedshiftBaseCapacity:
+    Type: Number
+    Default: 8
+    Description: >
+      Base capacity (RPUs) for the Iceberg-first workgroup. 8 is the
+      minimum. Mirrors the base workgroup so the A/B compares like with
+      like - the difference under test is the absence of the write drip
+      and scheduled reader, not a capacity change.
+    MinValue: 8
+    MaxValue: 512
+
+Resources:
+  # =========================================================================
+  # Redshift Serverless: a SECOND namespace + workgroup, Iceberg-first.
+  #
+  # It attaches the EXISTING iceberg data-lake query role (imported from the
+  # iceberg stack) as both an attached and the default role. On Redshift
+  # Serverless, external/Iceberg tables are read by the workgroup's own
+  # integrated data lake query engine - not the dedicated Spectrum fleet
+  # that provisioned DC2/RA3 clusters use - but the IAM role and grants are
+  # the same. That role already holds the Lake Formation grants on
+  # cdc_events_archive and the Glue resource link, and its trust policy is
+  # service-principal scoped (redshift-serverless.amazonaws.com), so a
+  # second namespace assumes it with no IAM or LF change. This is what keeps
+  # the stack cheap and side-effect-free against the existing deployment.
+  #
+  # No DeletionPolicy (demo stack; teardown.sh removes everything). For
+  # production add DeletionPolicy: Snapshot on the namespace.
+  # =========================================================================
+  IcebergFirstNamespace:
+    Type: AWS::RedshiftServerless::Namespace
+    Properties:
+      NamespaceName: !Sub "${ProjectName}-iceberg-ns"
+      DbName: dev
+      AdminUsername: admin
+      ManageAdminPassword: true
+      IamRoles:
+        - Fn::ImportValue: !Sub "${ProjectName}-iceberg-redshift-role-arn"
+      DefaultIamRoleArn:
+        Fn::ImportValue: !Sub "${ProjectName}-iceberg-redshift-role-arn"
+      Tags:
+        - Key: Project
+          Value: !Ref ProjectName
+        - Key: Architecture
+          Value: iceberg-first
+
+  IcebergFirstWorkgroup:
+    Type: AWS::RedshiftServerless::Workgroup
+    Properties:
+      WorkgroupName: !Sub "${ProjectName}-iceberg-wg"
+      NamespaceName: !Ref IcebergFirstNamespace
+      BaseCapacity: !Ref RedshiftBaseCapacity
+      PubliclyAccessible: false
+      Tags:
+        - Key: Project
+          Value: !Ref ProjectName
+        - Key: Architecture
+          Value: iceberg-first
+
+Outputs:
+  IcebergFirstWorkgroupName:
+    Description: Iceberg-first Redshift Serverless workgroup (use with the Data API)
+    Value: !Ref IcebergFirstWorkgroup
+    Export:
+      Name: !Sub "${ProjectName}-iceberg-first-workgroup"
+
+  IcebergFirstWorkgroupArn:
+    Description: Workgroup ARN
+    Value: !GetAtt IcebergFirstWorkgroup.Workgroup.WorkgroupArn
+    Export:
+      Name: !Sub "${ProjectName}-iceberg-first-workgroup-arn"
+
+  IcebergFirstNamespaceName:
+    Description: Iceberg-first namespace name
+    Value: !Ref IcebergFirstNamespace
+    Export:
+      Name: !Sub "${ProjectName}-iceberg-first-namespace"
+
+  IcebergFirstAdminSecretName:
+    # Same ManageAdminPassword convention as the base stack: the secret is
+    # named "redshift!<namespace>-admin". Referenced via !Ref so a rename
+    # can't silently desync the export.
+    Description: Name of the Secrets Manager secret holding the admin password
+    Value: !Sub "redshift!${IcebergFirstNamespace}-admin"
+    Export:
+      Name: !Sub "${ProjectName}-iceberg-first-admin-secret-name"
+
+  RedshiftDatabase:
+    Description: Default database in the Iceberg-first namespace
+    Value: dev
+    Export:
+      Name: !Sub "${ProjectName}-iceberg-first-database"

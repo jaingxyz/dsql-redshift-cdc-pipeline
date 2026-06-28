@@ -61,6 +61,10 @@ delete_stack_if_exists() {
 # table empty) - but deleting tiering first removes the schedule
 # entirely, which is cleaner.
 delete_stack_if_exists "${PROJECT_NAME}-tiering" "tiering automation"
+# Iceberg-first BEFORE iceberg: it imports the iceberg stack's Spectrum
+# role export, and CFN blocks deleting a stack whose exports are still
+# imported elsewhere.
+delete_stack_if_exists "${PROJECT_NAME}-iceberg-first" "Iceberg-first comparison"
 delete_stack_if_exists "${PROJECT_NAME}-iceberg" "Iceberg cold path"
 delete_stack_if_exists "${PROJECT_NAME}-sagemaker" "SageMaker access"
 delete_stack_if_exists "${PROJECT_NAME}-simulator" "always-on simulator"

@@ -258,6 +258,57 @@ SNS, ends successfully) when the cold side has zero rows for the window.
 Tear down: handled by `teardown.sh` (deletes the tiering stack before the
 Iceberg stack so the schedule is gone before the cold archive disappears).
 
+### Iceberg-first comparison (`cloudformation-iceberg-first.yaml`)
+
+A second Redshift Serverless namespace + workgroup that reads the existing
+Iceberg cold archive **directly** - no hot table, no CDC writer Lambda, no
+prune, no hot/cold UNION views. This is the architecture Part 3 of the blog
+series argues for: Iceberg is the sole landing zone, and Redshift becomes an
+on-demand query engine that suspends to zero between query bursts because
+nothing writes to it.
+
+It is **additive and optional**. It stands alongside the dual-write pipeline
+rather than replacing it, so you can pick an entry point:
+
+- **Follow the journey** - deploy the base pipeline + Iceberg cold path +
+  tiering (Parts 2a/2b: hot table, cold archive, unified views, scheduled
+  prune), then add this stack to see the simpler shape next to it.
+- **Start Iceberg-first** - deploy the base pipeline and the Iceberg cold
+  path, then this stack, and query the cold archive directly. (You still
+  need the base pipeline and `07-deploy-iceberg.sh` for the DSQL -> Kinesis
+  -> Firehose -> Iceberg ingestion; this stack only adds the read side.)
+
+Because both workgroups read the **same** Iceberg table, they are a clean
+cost/latency A/B: the base `*-wg` stays pinned at its base capacity under the
+write feed, while this `*-iceberg-wg` suspends to 0 RPU when idle.
+
+**Prerequisite:** the Iceberg cold path (`07-deploy-iceberg.sh`) must already
+be deployed - this stack reuses its data-lake query IAM role and the Glue
+resource link, so it needs **no new IAM role and no new Lake Formation
+grants**. (On Redshift Serverless the cold tables are read by the workgroup's
+integrated data lake query engine, not the dedicated Spectrum fleet that
+provisioned DC2/RA3 clusters use; the IAM role is the same either way.)
+
+```bash
+infra/scripts/09-deploy-iceberg-first.sh
+```
+
+**What gets created:**
+
+- A second Redshift Serverless namespace + workgroup, with the existing
+  iceberg data-lake query role attached as both an attached and the default
+  role.
+- A `cold` external schema on the new workgroup, pointing at the same Glue
+  resource link the base workgroup uses.
+
+The script verifies the new workgroup reads `cold.cdc_events_archive`
+end-to-end. To compare idle behavior, watch `ComputeCapacity` for both
+workgroups in CloudWatch - do **not** query a workgroup to check whether it
+suspended; any query resets the idle timer.
+
+Sample current-state query (dedup-on-read straight off Iceberg, no hot
+table): `analytics/iceberg_first_current_state.sql`.
+
 ## Tearing it down
 
 ```bash
