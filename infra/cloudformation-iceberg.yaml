@@ -292,7 +292,7 @@ Resources:
     Condition: WantFirehose
     Properties:
       FunctionName: !Sub "${ProjectName}-iceberg-transform"
-      Runtime: python3.11
+      Runtime: python3.13
       Handler: firehose_transform.lambda_handler
       Role: !GetAtt TransformLambdaRole.Arn
       # Firehose's Lambda invocation timeout cap is 5 min; the transform

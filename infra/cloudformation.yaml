@@ -183,7 +183,7 @@ Resources:
     Type: AWS::Lambda::Function
     Properties:
       FunctionName: !Sub "${ProjectName}-processor"
-      Runtime: python3.11
+      Runtime: python3.13
       Handler: cdc_processor.lambda_handler
       Role: !GetAtt LambdaExecRole.Arn
       # Headroom for synchronous Redshift describe-statement polling:
