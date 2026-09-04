@@ -3,4 +3,4 @@
 # bundled in the Lambda runtime — no Lambda-side install needed.
 
 boto3>=1.43.79
-psycopg[binary]>=3.3.4
+psycopg[binary]>=3.3.5
