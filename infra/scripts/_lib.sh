@@ -12,6 +12,18 @@ set -euo pipefail
 : "${STACK_NAME:=${PROJECT_NAME}-stack}"
 : "${REDSHIFT_BASE_CAPACITY:=8}"
 
+# PROJECT_NAME flows into resource names, stack names, and (in some scripts)
+# into SQL identifiers interpolated through the Redshift Data API. The CFN
+# templates constrain it with AllowedPattern; mirror that same constraint here
+# so the shell path can't carry a value the templates would reject - and so a
+# stray shell metacharacter can never reach an interpolated SQL string. Keep
+# this regex in sync with the templates' ProjectName AllowedPattern.
+if ! printf '%s' "${PROJECT_NAME}" | grep -Eq '^[a-z][a-z0-9-]{2,30}$'; then
+    printf '\033[31m[ERR ]\033[0m PROJECT_NAME %q is invalid; must match ^[a-z][a-z0-9-]{2,30}$\n' \
+        "${PROJECT_NAME}" >&2
+    exit 1
+fi
+
 export PROJECT_NAME AWS_REGION STACK_NAME REDSHIFT_BASE_CAPACITY
 
 # Resolved at runtime by the scripts that need them
