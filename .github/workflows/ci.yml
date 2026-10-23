@@ -15,7 +15,7 @@ concurrency:
 
 jobs:
   python:
-    name: Python lint
+    name: Python lint + test
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
@@ -30,10 +30,16 @@ jobs:
         run: pip install ruff==0.7.4
 
       - name: Lint
-        run: ruff check app/ --output-format=github
+        run: ruff check app/ tests/ --output-format=github
 
       - name: Format check
-        run: ruff format --check app/
+        run: ruff format --check app/ tests/
+
+      - name: Install test deps
+        run: pip install -r tests/requirements.txt
+
+      - name: Test
+        run: python -m pytest -q tests
 
   shell:
     name: shellcheck
