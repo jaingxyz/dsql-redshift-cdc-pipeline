@@ -1,0 +1,4 @@
+# Test-only dependencies (CI + local). boto3 is needed only so the Lambda
+# modules import; no AWS calls are made.
+boto3==1.43.118
+pytest==9.1.1
